@@ -120,6 +120,7 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
 
   // New Batch Input State
   const [newBatchName, setNewBatchName] = useState("");
+  const [newBatchCourseTrack, setNewBatchCourseTrack] = useState<"data-science" | "python" | "java">("data-science");
   const [showAddBatch, setShowAddBatch] = useState(false);
 
   // Custom Quiz Overrider
@@ -155,6 +156,24 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
       }
     } catch (err) {
       console.error("Failed to edit student placement gateway status:", err);
+    }
+  };
+
+  const handleUnlockStudentLogin = async (studentId: string) => {
+    try {
+      const res = await fetch(`/api/students/${studentId}/unlock-login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      });
+      if (res.ok) {
+        const body = await res.json();
+        if (body.success) {
+          setStudents(body.students || []);
+          setSelectedStudentForAccess(prev => prev && prev.id === studentId ? { ...prev, loginLockedUntil: undefined, failedLoginAttempts: 0 } : prev);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to unlock student login:", err);
     }
   };
 
@@ -964,7 +983,7 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
       const res = await fetch("/api/batches", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ batchName: newBatchName })
+        body: JSON.stringify({ batchName: newBatchName, courseTrack: newBatchCourseTrack })
       });
 
       if (res.ok) {
@@ -973,6 +992,7 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
         setLocks(data.locks);
         setSelectedBatch(newBatchName.trim());
         setNewBatchName("");
+        setNewBatchCourseTrack("data-science");
         setShowAddBatch(false);
       } else {
         const err = await res.json();
@@ -980,6 +1000,26 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
       }
     } catch (e) {
       alert("Error creating selection batch");
+    }
+  };
+
+  const handleUpdateBatchCourseTrack = async (track: "data-science" | "python" | "java") => {
+    if (!selectedBatch) return;
+    try {
+      const res = await fetch(`/api/batches/${encodeURIComponent(selectedBatch)}/course-track`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ courseTrack: track })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setLocks(data.locks);
+      } else {
+        const err = await res.json();
+        alert(err.error || "Failed to update course track");
+      }
+    } catch (e) {
+      alert("Error updating course track");
     }
   };
 
@@ -1394,57 +1434,36 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
         </div>
 
         <div className="flex items-center gap-4">
-          {/* Active Batch Control dropdown — drives Curriculum, Daily/Monthly
-              Tests, and AI Interview review across the whole dashboard, so it's
-              grouped by course track the same way as the student login dropdown. */}
+          {/* Active Batch Control dropdown */}
           <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 px-3 py-1 rounded-md">
             <span className="text-[10px] font-bold font-sans tracking-wide uppercase text-slate-400">BATCH:</span>
-            {(() => {
-              const dataScienceBatches = batches.filter((b) => /data\s*science/i.test(b) && !/python/i.test(b) && !/java/i.test(b));
-              const pythonBatches = batches.filter((b) => /python/i.test(b));
-              const javaBatches = batches.filter((b) => /java/i.test(b) && !/python/i.test(b));
-              const otherBatches = batches.filter(
-                (b) => !dataScienceBatches.includes(b) && !pythonBatches.includes(b) && !javaBatches.includes(b)
-              );
-              return (
-                <select
-                  className="bg-transparent text-xs font-semibold text-white border-none focus:ring-0 cursor-pointer outline-none"
-                  value={selectedBatch}
-                  onChange={(e) => setSelectedBatch(e.target.value)}
-                >
-                  <option value="" disabled className="bg-slate-900">Select Batch</option>
-                  {dataScienceBatches.length > 0 && (
-                    <optgroup label="Data Science Batches" className="bg-slate-900">
-                      {dataScienceBatches.map((b) => (
-                        <option key={b} value={b} className="bg-slate-900">{b}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                  {pythonBatches.length > 0 && (
-                    <optgroup label="Python Full Stack Batches" className="bg-slate-900">
-                      {pythonBatches.map((b) => (
-                        <option key={b} value={b} className="bg-slate-900">{b}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                  {javaBatches.length > 0 && (
-                    <optgroup label="Java Full Stack Batches" className="bg-slate-900">
-                      {javaBatches.map((b) => (
-                        <option key={b} value={b} className="bg-slate-900">{b}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                  {otherBatches.length > 0 && (
-                    <optgroup label="Other Batches" className="bg-slate-900">
-                      {otherBatches.map((b) => (
-                        <option key={b} value={b} className="bg-slate-900">{b}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                </select>
-              );
-            })()}
+            <select
+              className="bg-transparent text-xs font-semibold text-white border-none focus:ring-0 cursor-pointer outline-none"
+              value={selectedBatch}
+              onChange={(e) => setSelectedBatch(e.target.value)}
+            >
+              <option value="" disabled className="bg-slate-900">Select Batch</option>
+              {batches.map((b) => (
+                <option key={b} value={b} className="bg-slate-900">{b}</option>
+              ))}
+            </select>
           </div>
+
+          {selectedBatch && (
+            <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 px-3 py-1 rounded-md">
+              <span className="text-[10px] font-bold font-sans tracking-wide uppercase text-slate-400">TRACK:</span>
+              <select
+                className="bg-transparent text-xs font-semibold text-amber-400 border-none focus:ring-0 cursor-pointer outline-none"
+                value={locks[selectedBatch]?.courseTrack || "data-science"}
+                onChange={(e) => handleUpdateBatchCourseTrack(e.target.value as "data-science" | "python" | "java")}
+                title="Which curriculum/AI-interview track this batch follows"
+              >
+                <option value="data-science" className="bg-slate-900">Data Science</option>
+                <option value="python" className="bg-slate-900">Python</option>
+                <option value="java" className="bg-slate-900">Java</option>
+              </select>
+            </div>
+          )}
 
           <button
             onClick={() => setShowAddBatch(true)}
@@ -2437,7 +2456,20 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
                                   </button>
                                 </td>
                               <td className="py-3.5 px-4 text-slate-500 font-mono text-xs">{st.email || "N/A"}</td>
-                              <td className="py-3.5 px-4 text-slate-600 font-mono text-xs font-semibold">{st.phoneNumber || "Not Bound / Enter on Login"}</td>
+                              <td className="py-3.5 px-4 text-slate-600 font-mono text-xs font-semibold">
+                                <div>{st.phoneNumber || "Not Bound / Enter on Login"}</div>
+                                {st.loginLockedUntil && new Date(st.loginLockedUntil).getTime() > Date.now() && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleUnlockStudentLogin(st.id)}
+                                    className="mt-1 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 px-2 py-0.5 rounded text-[9px] font-mono font-black uppercase tracking-wider flex items-center gap-1 cursor-pointer transition"
+                                    title="3 failed login attempts — locked for 24 hours. Click to unlock now."
+                                  >
+                                    <Lock className="w-2.5 h-2.5" />
+                                    Locked — Click to Unlock
+                                  </button>
+                                )}
+                              </td>
                               <td className="py-3.5 px-4 space-y-1.5">
                                 <span className="font-bold text-amber-700 bg-amber-50 border border-amber-100 px-2 py-0.5 rounded text-[10px] inline-flex items-center gap-1 font-mono">
                                   {assessments.filter(a => a.studentId === st.id).length} Assessments
@@ -3513,6 +3545,22 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
                   placeholder="e.g. Batch D (Evening)"
                   className="w-full bg-slate-50 border border-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 mb-1">Course Track</label>
+                <select
+                  value={newBatchCourseTrack}
+                  onChange={(e) => setNewBatchCourseTrack(e.target.value as "data-science" | "python" | "java")}
+                  className="w-full bg-slate-50 border border-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500 cursor-pointer"
+                >
+                  <option value="data-science">Data Science (200-Day Curriculum)</option>
+                  <option value="python">Python</option>
+                  <option value="java">Java</option>
+                </select>
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Determines which AI Interview subjects this batch's students see (e.g. Java batches get Java interview topics).
+                </p>
               </div>
 
               <div className="flex gap-3 justify-end pt-2">
