@@ -1394,19 +1394,56 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
         </div>
 
         <div className="flex items-center gap-4">
-          {/* Active Batch Control dropdown */}
+          {/* Active Batch Control dropdown — drives Curriculum, Daily/Monthly
+              Tests, and AI Interview review across the whole dashboard, so it's
+              grouped by course track the same way as the student login dropdown. */}
           <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 px-3 py-1 rounded-md">
             <span className="text-[10px] font-bold font-sans tracking-wide uppercase text-slate-400">BATCH:</span>
-            <select
-              className="bg-transparent text-xs font-semibold text-white border-none focus:ring-0 cursor-pointer outline-none"
-              value={selectedBatch}
-              onChange={(e) => setSelectedBatch(e.target.value)}
-            >
-              <option value="" disabled className="bg-slate-900">Select Batch</option>
-              {batches.map((b) => (
-                <option key={b} value={b} className="bg-slate-900">{b}</option>
-              ))}
-            </select>
+            {(() => {
+              const dataScienceBatches = batches.filter((b) => /data\s*science/i.test(b) && !/python/i.test(b) && !/java/i.test(b));
+              const pythonBatches = batches.filter((b) => /python/i.test(b));
+              const javaBatches = batches.filter((b) => /java/i.test(b) && !/python/i.test(b));
+              const otherBatches = batches.filter(
+                (b) => !dataScienceBatches.includes(b) && !pythonBatches.includes(b) && !javaBatches.includes(b)
+              );
+              return (
+                <select
+                  className="bg-transparent text-xs font-semibold text-white border-none focus:ring-0 cursor-pointer outline-none"
+                  value={selectedBatch}
+                  onChange={(e) => setSelectedBatch(e.target.value)}
+                >
+                  <option value="" disabled className="bg-slate-900">Select Batch</option>
+                  {dataScienceBatches.length > 0 && (
+                    <optgroup label="Data Science Batches" className="bg-slate-900">
+                      {dataScienceBatches.map((b) => (
+                        <option key={b} value={b} className="bg-slate-900">{b}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {pythonBatches.length > 0 && (
+                    <optgroup label="Python Full Stack Batches" className="bg-slate-900">
+                      {pythonBatches.map((b) => (
+                        <option key={b} value={b} className="bg-slate-900">{b}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {javaBatches.length > 0 && (
+                    <optgroup label="Java Full Stack Batches" className="bg-slate-900">
+                      {javaBatches.map((b) => (
+                        <option key={b} value={b} className="bg-slate-900">{b}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {otherBatches.length > 0 && (
+                    <optgroup label="Other Batches" className="bg-slate-900">
+                      {otherBatches.map((b) => (
+                        <option key={b} value={b} className="bg-slate-900">{b}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+              );
+            })()}
           </div>
 
           <button
