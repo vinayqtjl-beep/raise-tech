@@ -2301,7 +2301,6 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
             onProgressSubmit={() => fetchStudentContext()}
             scheduledTests={scheduledTests}
             scheduledSubmissions={scheduledSubmissions}
-            monthlyTestLocked={!(locks["Global"]?.featureLocks?.monthlyTest || locks[student.batch]?.featureLocks?.monthlyTest)}
           />
         ) : activeTab === "resume" ? (
           !(locks["Global"]?.featureLocks?.resume || locks[student.batch]?.featureLocks?.resume) ? (
@@ -2372,6 +2371,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                 overrides={overrides}
                 onRefreshContext={() => fetchStudentContext()}
                 teacherAuthorized={interviewTeacherAuthorized}
+                courseTrack={locks[student.batch]?.courseTrack || "data-science"}
               />
             );
           })()
@@ -3405,14 +3405,17 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                   />
                                 </div>
                                 <div className="space-y-1">
-                                  <label className="text-[10px] uppercase font-bold text-slate-500 font-mono">YouTube URL or Video Link *</label>
+                                  <label className="text-[10px] uppercase font-bold text-slate-500 font-mono">YouTube or Google Drive Link *</label>
                                   <input
                                     type="text"
-                                    placeholder="e.g. https://www.youtube.com/watch?v=..."
+                                    placeholder="e.g. https://drive.google.com/file/d/.../view?usp=sharing"
                                     value={newVideoForm.videoUrl}
                                     onChange={(e) => setNewVideoForm({ ...newVideoForm, videoUrl: e.target.value })}
                                     className="bg-slate-50 border border-slate-200 text-slate-800 text-xs p-2 rounded-lg outline-none w-full focus:border-amber-500 transition"
                                   />
+                                  <p className="text-[9px] text-slate-400 font-sans mt-0.5">
+                                    Paste the "Share" link from Google Drive (set to "Anyone with the link") — it plays inline automatically, no extra formatting needed. Great for updating each day's recording.
+                                  </p>
                                 </div>
                               </div>
 
@@ -3467,6 +3470,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                               {chapterVideos.map((video) => {
                                 const isYoutube = video.videoUrl.includes("youtube.com/embed/");
+                                const isDrive = video.videoUrl.includes("drive.google.com");
                                 const isBook = video.attachmentType === "book";
                                 const isMaterial = video.attachmentType === "material";
                                 return (
@@ -3483,11 +3487,16 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                             ? "bg-emerald-50 text-emerald-700 border-emerald-150"
                                             : "bg-amber-50 text-amber-700 border-amber-150"
                                         }`}>
-                                          {isBook ? "📚 REFERENCE BOOK" : isMaterial ? "📁 STUDY MATERIAL" : (isYoutube ? "🎥 YOUTUBE GUIDE" : "🎥 VIDEO GUIDE")}
+                                          {isBook ? "📚 REFERENCE BOOK" : isMaterial ? "📁 STUDY MATERIAL" : (isYoutube ? "🎥 YOUTUBE GUIDE" : isDrive ? "🎥 DRIVE VIDEO" : "🎥 VIDEO GUIDE")}
                                         </span>
                                         <span className="text-[8.5px] text-zinc-400 font-mono truncate max-w-[125px]">
                                           By {video.addedBy}
                                         </span>
+                                      </div>
+
+                                      <div className="flex items-center gap-1 text-[8px] font-mono font-bold text-amber-600/80 uppercase tracking-wide">
+                                        <span className="w-3 h-3 bg-amber-600 rounded-full flex items-center justify-center text-white text-[6px] shrink-0">R</span>
+                                        Raise Tech Academy
                                       </div>
 
                                       <h5 className="font-bold text-xs text-slate-800 line-clamp-1 group-hover:text-amber-900 leading-snug">
@@ -3675,9 +3684,12 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
             {/* Header bar */}
             <div className="bg-slate-950 p-4 border-b border-white/5 flex items-center justify-between">
               <div className="space-y-0.5">
-                <span className="text-[10px] font-mono font-bold text-amber-400 uppercase tracking-wider block">
-                  ★ STUDY COMPANION THEATER
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-4 h-4 bg-amber-600 rounded-full flex items-center justify-center text-white text-[8px] font-black shrink-0">R</span>
+                  <span className="text-[10px] font-mono font-bold text-amber-400 uppercase tracking-wider block">
+                    Raise Tech Academy &bull; Study Companion Theater
+                  </span>
+                </div>
                 <span className="text-white text-sm font-bold block truncate max-w-[280px] sm:max-w-md">
                   {selectedVideo.title}
                 </span>
@@ -3700,6 +3712,14 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                   allowFullScreen
                   referrerPolicy="no-referrer"
+                />
+              ) : selectedVideo.videoUrl.includes("drive.google.com") ? (
+                <iframe
+                  src={selectedVideo.videoUrl}
+                  title={selectedVideo.title}
+                  className="absolute inset-0 w-full h-full border-0"
+                  allow="autoplay"
+                  allowFullScreen
                 />
               ) : (
                 <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-6 space-y-4">
