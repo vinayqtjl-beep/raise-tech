@@ -10,6 +10,7 @@ import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, getDocFromServer } from "firebase/firestore";
 
 const app = express();
+app.set("trust proxy", true);
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 
 app.use(express.json({ limit: "20mb" }));
@@ -92,6 +93,9 @@ interface AppDatabase {
   scheduledTests?: any[];
   scheduledSubmissions?: any[];
   recordedVideos?: any[];
+  // Tracks failed teacher-login attempts per client, keyed by IP address, so a
+  // lockout survives server restarts (not just an in-memory counter).
+  teacherLoginSecurity?: Record<string, { attempts: number; lockedUntil: number | null }>;
 }
 
 const DEFAULT_DB: AppDatabase = {
@@ -335,13 +339,78 @@ function writeDB(data: AppDatabase) {
 }
 
 // 1. Teacher password verification
+// Security: after 3 incorrect password attempts from the same client, that
+// client is locked out of the teacher login for 24 hours. The lockout is
+// tracked server-side (per IP, persisted in the DB) so it can't be bypassed
+// by refreshing the page or clearing client-side state.
+const TEACHER_LOGIN_MAX_ATTEMPTS = 3;
+const TEACHER_LOGIN_LOCK_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function getClientKey(req: express.Request): string {
+  const forwarded = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim();
+  return forwarded || req.ip || "unknown-client";
+}
+
 app.post("/api/auth/teacher", (req, res) => {
   const { password } = req.body;
-  if (password === "vinay@2003") {
-    res.json({ success: true, token: "teacher-valid-token-vinay-2003" });
-  } else {
-    res.status(401).json({ success: false, error: "Incorrect teacher password" });
+  const db = readDB();
+  if (!db.teacherLoginSecurity) db.teacherLoginSecurity = {};
+
+  const clientKey = getClientKey(req);
+  const entry = db.teacherLoginSecurity[clientKey] || { attempts: 0, lockedUntil: null };
+
+  // Still inside an active lockout window -> reject immediately, don't check the password.
+  if (entry.lockedUntil && Date.now() < entry.lockedUntil) {
+    const remainingMs = entry.lockedUntil - Date.now();
+    const remainingHours = Math.max(1, Math.ceil(remainingMs / (60 * 60 * 1000)));
+    res.status(429).json({
+      success: false,
+      locked: true,
+      lockedUntil: entry.lockedUntil,
+      error: `Too many incorrect attempts. Teacher login is locked for approximately ${remainingHours} more hour(s).`
+    });
+    return;
   }
+
+  // Lockout window has expired -> reset the counter before evaluating this attempt.
+  if (entry.lockedUntil && Date.now() >= entry.lockedUntil) {
+    entry.attempts = 0;
+    entry.lockedUntil = null;
+  }
+
+  if (password === "vinay@2003") {
+    entry.attempts = 0;
+    entry.lockedUntil = null;
+    db.teacherLoginSecurity[clientKey] = entry;
+    writeDB(db);
+    res.json({ success: true, token: "teacher-valid-token-vinay-2003" });
+    return;
+  }
+
+  entry.attempts += 1;
+
+  if (entry.attempts >= TEACHER_LOGIN_MAX_ATTEMPTS) {
+    entry.lockedUntil = Date.now() + TEACHER_LOGIN_LOCK_DURATION_MS;
+    db.teacherLoginSecurity[clientKey] = entry;
+    writeDB(db);
+    res.status(429).json({
+      success: false,
+      locked: true,
+      lockedUntil: entry.lockedUntil,
+      error: "Too many incorrect attempts. Teacher login is now locked for 24 hours."
+    });
+    return;
+  }
+
+  db.teacherLoginSecurity[clientKey] = entry;
+  writeDB(db);
+  const remaining = TEACHER_LOGIN_MAX_ATTEMPTS - entry.attempts;
+  res.status(401).json({
+    success: false,
+    locked: false,
+    attemptsRemaining: remaining,
+    error: `Incorrect teacher password. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining before a 24-hour lock.`
+  });
 });
 
 // 2. Fetch complete DB info
