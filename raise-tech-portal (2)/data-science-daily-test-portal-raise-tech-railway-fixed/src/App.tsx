@@ -28,6 +28,10 @@ export default function App() {
   const [studentRoll, setStudentRoll] = useState("");
   const [studentPhone, setStudentPhone] = useState("");
   const [teacherPass, setTeacherPass] = useState("");
+  // Set when the server reports the teacher login is locked out (3 wrong
+  // attempts -> 24 hour lock). Holds the epoch ms timestamp the lock expires.
+  const [teacherLockedUntil, setTeacherLockedUntil] = useState<number | null>(null);
+  const [lockCountdown, setLockCountdown] = useState<string>("");
 
   const [activeStudent, setActiveStudent] = useState<Student | null>(null);
 
@@ -48,6 +52,30 @@ export default function App() {
   useEffect(() => {
     fetchBootData();
   }, []);
+
+  // Live countdown while the teacher login is locked out.
+  useEffect(() => {
+    if (!teacherLockedUntil) {
+      setLockCountdown("");
+      return;
+    }
+    const tick = () => {
+      const remainingMs = teacherLockedUntil - Date.now();
+      if (remainingMs <= 0) {
+        setTeacherLockedUntil(null);
+        setLockCountdown("");
+        setAuthError(null);
+        return;
+      }
+      const hours = Math.floor(remainingMs / (60 * 60 * 1000));
+      const minutes = Math.floor((remainingMs % (60 * 60 * 1000)) / (60 * 1000));
+      const seconds = Math.floor((remainingMs % (60 * 1000)) / 1000);
+      setLockCountdown(`${hours}h ${minutes}m ${seconds}s`);
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [teacherLockedUntil]);
 
   const fetchBootData = async () => {
     try {
@@ -176,15 +204,19 @@ export default function App() {
         body: JSON.stringify({ password: teacherPass })
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setRole("teacher_active");
-          setTeacherPass("");
-        }
-      } else {
-        setAuthError("Incorrect Teacher Pin Code. Please try again.");
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        setRole("teacher_active");
+        setTeacherPass("");
+        setTeacherLockedUntil(null);
+        return;
       }
+
+      if (data.locked && data.lockedUntil) {
+        setTeacherLockedUntil(data.lockedUntil);
+      }
+      setAuthError(data.error || "Incorrect Teacher Pin Code. Please try again.");
     } catch (e) {
       setAuthError("Failed to connect to teacher authentication API.");
     }
@@ -346,15 +378,40 @@ export default function App() {
                     <option>No active batches synced</option>
                   </select>
                 ) : (
-                  <select
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold text-slate-700 font-sans cursor-pointer"
-                    value={selectedBatch}
-                    onChange={(e) => setSelectedBatch(e.target.value)}
-                  >
-                    {batches.map((b) => (
-                      <option key={b} value={b}>{b}</option>
-                    ))}
-                  </select>
+                  (() => {
+                    const dataScienceBatches = batches.filter((b) => /data\s*science/i.test(b) && !/python/i.test(b));
+                    const pythonBatches = batches.filter((b) => /python/i.test(b));
+                    const otherBatches = batches.filter((b) => !dataScienceBatches.includes(b) && !pythonBatches.includes(b));
+                    return (
+                      <select
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold text-slate-700 font-sans cursor-pointer"
+                        value={selectedBatch}
+                        onChange={(e) => setSelectedBatch(e.target.value)}
+                      >
+                        {dataScienceBatches.length > 0 && (
+                          <optgroup label="Data Science Batches">
+                            {dataScienceBatches.map((b) => (
+                              <option key={b} value={b}>{b}</option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {pythonBatches.length > 0 && (
+                          <optgroup label="Python Full Stack Batches">
+                            {pythonBatches.map((b) => (
+                              <option key={b} value={b}>{b}</option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {otherBatches.length > 0 && (
+                          <optgroup label="Other Batches">
+                            {otherBatches.map((b) => (
+                              <option key={b} value={b}>{b}</option>
+                            ))}
+                          </optgroup>
+                        )}
+                      </select>
+                    );
+                  })()
                 )}
               </div>
 
@@ -425,6 +482,11 @@ export default function App() {
             {authError && (
               <div className="bg-red-50 text-red-700 border border-red-200 p-3 rounded-lg text-xs leading-relaxed font-semibold">
                 {authError}
+                {teacherLockedUntil && lockCountdown && (
+                  <div className="mt-2 font-mono font-bold text-red-800 tracking-wide">
+                    ⏳ Unlocks in {lockCountdown}
+                  </div>
+                )}
               </div>
             )}
 
@@ -434,10 +496,11 @@ export default function App() {
                 <input
                   type="password"
                   required
+                  disabled={!!teacherLockedUntil}
                   placeholder="Enter Pin"
                   value={teacherPass}
                   onChange={(e) => setTeacherPass(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded px-4 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono tracking-widest text-center"
+                  className="w-full bg-slate-50 border border-slate-200 rounded px-4 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono tracking-widest text-center disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
                 />
               </div>
 
@@ -451,9 +514,10 @@ export default function App() {
                 </button>
                 <button
                   type="submit"
-                  className="w-2/3 bg-slate-900 hover:bg-slate-800 text-white font-semibold py-2 rounded text-sm transition"
+                  disabled={!!teacherLockedUntil}
+                  className="w-2/3 bg-slate-900 hover:bg-slate-800 text-white font-semibold py-2 rounded text-sm transition disabled:bg-slate-300 disabled:cursor-not-allowed"
                 >
-                  Authenticate
+                  {teacherLockedUntil ? "Locked" : "Authenticate"}
                 </button>
               </div>
             </form>
