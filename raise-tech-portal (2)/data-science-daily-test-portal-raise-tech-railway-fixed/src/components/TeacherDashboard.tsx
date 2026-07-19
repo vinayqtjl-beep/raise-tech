@@ -3055,13 +3055,13 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
                         <input
                           type="text"
                           required
-                          placeholder="e.g. https://www.youtube.com/watch?v=..."
+                          placeholder="e.g. https://drive.google.com/file/d/.../view?usp=sharing"
                           value={newVideoForm.videoUrl}
                           onChange={(e) => setNewVideoForm({ ...newVideoForm, videoUrl: e.target.value })}
                           className="w-full bg-white border border-slate-250 rounded-xl px-3 py-2 text-xs font-mono font-medium text-slate-800 focus:outline-none focus:ring-1 focus:ring-amber-500"
                         />
                         <span className="text-[9px] text-slate-400 mt-1 block leading-relaxed font-sans">
-                          Supports direct YouTube links (which will automatically format to raw embed player screens) or any other standard external stream reference path.
+                          Supports YouTube links AND Google Drive "Share" links (set to "Anyone with the link") — both auto-format into an inline player. Ideal for updating each day's class recording straight from Drive.
                         </span>
                       </div>
 
@@ -3137,7 +3137,11 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
                                       ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                                       : "bg-orange-50 text-orange-700 border-orange-200"
                                   }`}>
-                                    {video.attachmentType === "book" ? "📚 BOOK" : video.attachmentType === "material" ? "📁 STUDY MATERIAL" : "🎥 VIDEO GUIDE"}
+                                    {video.attachmentType === "book" ? "📚 BOOK" : video.attachmentType === "material" ? "📁 STUDY MATERIAL" : video.videoUrl.includes("drive.google.com") ? "🎥 DRIVE VIDEO" : "🎥 VIDEO GUIDE"}
+                                  </span>
+                                  <span className="inline-flex items-center gap-1 text-[8px] font-mono font-bold text-amber-600/80 uppercase tracking-wide">
+                                    <span className="w-3 h-3 bg-amber-600 rounded-full flex items-center justify-center text-white text-[6px] shrink-0">R</span>
+                                    Raise Tech
                                   </span>
                                   <span className="text-[9px] text-zinc-400 font-mono">
                                     By {video.addedBy || "Instructor"} &bull; {new Date(video.uploadedAt).toLocaleDateString()}
