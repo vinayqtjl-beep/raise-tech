@@ -9,6 +9,8 @@ export interface Student {
   placementPermission?: boolean; // Allowed placement gateway access by teacher
   interviewRewritePermission?: boolean; // Allowed rewrite/reattempt of the AI mock interview
   rewriteDays?: number[]; // Day numbers allowed for rewriting exams
+  failedLoginAttempts?: number; // Consecutive wrong-password (phone number) login attempts
+  loginLockedUntil?: string; // ISO timestamp — account is locked out until this time after 3 failed attempts
   placementDetails?: {
     linkedin?: string;
     indeed?: string;
@@ -37,13 +39,51 @@ export interface Batch {
   id: string;
   name: string;
   createdAt: string;
+  courseTrack?: "data-science" | "python" | "java"; // Which curriculum/interview track this batch follows
 }
+
+export type CourseTrack = "data-science" | "python" | "java";
+
+export interface InterviewSubject {
+  slug: string;
+  name: string;
+  icon: string;
+  description: string;
+}
+
+// Interview subject options for the Python-only track (batches tagged courseTrack: "python")
+export const PYTHON_TRACK_SUBJECTS: InterviewSubject[] = [
+  { slug: "python-core", name: "Python Core Fundamentals", icon: "Code2", description: "Syntax, data types, loops, functions, and error handling." },
+  { slug: "python-oop", name: "Python OOP & Design", icon: "Layers", description: "Classes, inheritance, polymorphism, and encapsulation." },
+  { slug: "python-dsa", name: "Data Structures & Algorithms", icon: "GitBranch", description: "Lists, stacks, queues, recursion, and complexity analysis." },
+  { slug: "python-advanced", name: "Advanced Python", icon: "Zap", description: "Decorators, generators, context managers, and concurrency." },
+  { slug: "python-db", name: "Python & Databases", icon: "Database", description: "SQLite/MySQL integration, ORMs, and query handling." },
+];
+
+// Interview subject options for the Java track (batches tagged courseTrack: "java")
+export const JAVA_TRACK_SUBJECTS: InterviewSubject[] = [
+  { slug: "java-core", name: "Core Java Fundamentals", icon: "Coffee", description: "Syntax, data types, control flow, and arrays." },
+  { slug: "java-oop", name: "Java OOP & Design", icon: "Layers", description: "Classes, inheritance, interfaces, and abstraction." },
+  { slug: "java-collections", name: "Collections Framework", icon: "Database", description: "List, Set, Map, and Comparator/Comparable usage." },
+  { slug: "java-concurrency", name: "Exception Handling & Multithreading", icon: "AlertTriangle", description: "Try-catch, custom exceptions, threads, and synchronization." },
+  { slug: "java-jdbc", name: "JDBC & Spring Boot Basics", icon: "Server", description: "Database connectivity, REST APIs, and Spring fundamentals." },
+];
+
+// Returns the AI Interview subject list a student should see, based on their batch's course track.
+// Defaults to the full Data Science SYLLABUS for "data-science" or untagged/legacy batches.
+export function getInterviewSubjectsForTrack(track?: string | null): InterviewSubject[] {
+  if (track === "java") return JAVA_TRACK_SUBJECTS;
+  if (track === "python") return PYTHON_TRACK_SUBJECTS;
+  return SYLLABUS;
+}
+
 
 export interface CourseLockState {
   batchName: string;
   unlockedCourses: string[]; // e.g., ['python', 'numpy']
   unlockedDays: number[];    // individual days unlocked, e.g., [1, 2, 3]
   courseLockState: Record<string, boolean>; // course slug -> locked boolean
+  courseTrack?: CourseTrack; // Which curriculum/interview track this batch follows (defaults to "data-science")
   featureLocks?: {
     interview: boolean;
     resume: boolean;
