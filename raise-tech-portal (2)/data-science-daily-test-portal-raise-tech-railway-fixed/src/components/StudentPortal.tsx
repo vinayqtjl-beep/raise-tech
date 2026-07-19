@@ -2301,6 +2301,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
             onProgressSubmit={() => fetchStudentContext()}
             scheduledTests={scheduledTests}
             scheduledSubmissions={scheduledSubmissions}
+            monthlyTestLocked={!(locks["Global"]?.featureLocks?.monthlyTest || locks[student.batch]?.featureLocks?.monthlyTest)}
           />
         ) : activeTab === "resume" ? (
           !(locks["Global"]?.featureLocks?.resume || locks[student.batch]?.featureLocks?.resume) ? (
