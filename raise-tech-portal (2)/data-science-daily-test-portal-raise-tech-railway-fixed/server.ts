@@ -1115,6 +1115,126 @@ async function generateContentWithRetry(ai: any, params: any, retries: number = 
   }
 }
 
+// -----------------------------------------------------------------------
+// AI-based coding/theory answer grading.
+// Replaces plain keyword string-matching with semantic evaluation by Gemini:
+// the model reads the question, the model solution, and the student's actual
+// answer, and judges correctness/understanding rather than checking whether
+// specific substrings appear in the text. Falls back to a conservative
+// length-based heuristic only if the Gemini client isn't configured, so
+// grading never silently fails.
+// -----------------------------------------------------------------------
+interface CodingGradeInput {
+  questionText: string;
+  modelSolution: string;
+  studentAnswer: string;
+}
+interface CodingGradeResult {
+  score: number;       // 0-100 for this question
+  isCorrect: boolean;  // score >= 60
+  feedback: string;    // short, specific, human-readable feedback
+}
+
+async function gradeCodingAnswersWithAI(items: CodingGradeInput[]): Promise<CodingGradeResult[]> {
+  const ai = getAi();
+
+  // Fallback (no Gemini key configured): give partial credit for a
+  // substantive attempt rather than blocking grading entirely. This is
+  // intentionally conservative and only used when AI grading is unavailable.
+  if (!ai) {
+    return items.map((item) => {
+      const attempted = item.studentAnswer.trim().length > 15;
+      return {
+        score: attempted ? 40 : 0,
+        isCorrect: false,
+        feedback: attempted
+          ? "AI grading is temporarily unavailable, so this answer received partial credit for a substantive attempt. Ask your instructor to review it manually."
+          : "No substantive answer was submitted."
+      };
+    });
+  }
+
+  const prompt = `You are grading a student's answers for a technical assessment. For EACH question below, compare the student's answer against the model solution and judge it on SEMANTIC correctness and conceptual understanding — NOT on whether specific keywords or exact code syntax appear in the text. A student can phrase or structure their answer completely differently from the model solution and still be fully correct, and a student can include all the "right words" while fundamentally misunderstanding the concept — grade the actual reasoning and correctness, not surface wording.
+
+Questions:
+${items.map((item, i) => `
+--- Question ${i + 1} ---
+Question: ${item.questionText}
+Model Solution: ${item.modelSolution}
+Student's Answer: ${item.studentAnswer || "(no answer submitted)"}
+`).join("\n")}
+
+Return a JSON array with exactly ${items.length} objects, one per question in order, each with:
+- score: integer 0-100 reflecting how semantically correct and complete the student's answer is
+- isCorrect: boolean, true if score >= 60
+- feedback: one or two sentences of specific, constructive feedback referencing what the student actually wrote`;
+
+  try {
+    const response = await generateContentWithRetry(ai, {
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        systemInstruction: "You are a fair, rigorous technical grader. You evaluate meaning and correctness, never simple keyword/string matching. You MUST respond with a JSON array strictly conforming to the requested schema, with exactly one entry per question, in order.",
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              score: { type: Type.INTEGER, description: "0-100 semantic correctness score" },
+              isCorrect: { type: Type.BOOLEAN, description: "true if score >= 60" },
+              feedback: { type: Type.STRING, description: "Short specific constructive feedback" }
+            },
+            required: ["score", "isCorrect", "feedback"]
+          }
+        }
+      }
+    });
+
+    const text = response.text ?? (response.candidates?.[0]?.content?.parts?.[0]?.text ?? "[]");
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed) && parsed.length === items.length) {
+      return parsed.map((r: any) => ({
+        score: Math.max(0, Math.min(100, Math.round(Number(r.score) || 0))),
+        isCorrect: !!r.isCorrect,
+        feedback: String(r.feedback || "")
+      }));
+    }
+    throw new Error("Unexpected AI grading response shape.");
+  } catch (e) {
+    console.error("[AI grading] Failed, falling back to partial credit:", e);
+    return items.map((item) => {
+      const attempted = item.studentAnswer.trim().length > 15;
+      return {
+        score: attempted ? 40 : 0,
+        isCorrect: false,
+        feedback: attempted
+          ? "AI grading service encountered an error, so this answer received partial credit for a substantive attempt. Ask your instructor to review it manually."
+          : "No substantive answer was submitted."
+      };
+    });
+  }
+}
+
+// Grades a set of coding/theory answers semantically and returns per-question
+// scores, correctness, and feedback — used by both the Comprehensive
+// Assessment and Scheduled (Weekly/Monthly) Test submit flows so free-text
+// answers are never graded by simple keyword matching.
+app.post("/api/assessments/grade-coding", async (req, res) => {
+  const { items } = req.body as { items: CodingGradeInput[] };
+  if (!Array.isArray(items) || items.length === 0) {
+    res.status(400).json({ error: "No questions supplied for grading." });
+    return;
+  }
+  try {
+    const results = await gradeCodingAnswersWithAI(items);
+    res.json({ success: true, results });
+  } catch (e) {
+    console.error("[POST /api/assessments/grade-coding] error:", e);
+    res.status(500).json({ error: "Failed to grade coding answers." });
+  }
+});
+
 const FALLBACK_QUESTIONS: Record<string, Record<string, string[]>> = {
   technical: {
     python: [
