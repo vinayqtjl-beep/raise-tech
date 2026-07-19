@@ -26,6 +26,59 @@ interface StudentAssessmentsViewProps {
   monthlyTestLocked?: boolean;
 }
 
+// Per-question AI grading result, shown alongside the model solution and the
+// student's own answer in the review screen.
+interface CodingGradeItem {
+  questionText: string;
+  modelSolution: string;
+  studentAnswer: string;
+  score: number;      // 0-100 for this question
+  isCorrect: boolean;
+  feedback: string;
+}
+
+// Converts a 0-100 overall score into a letter grade for display.
+function scoreToLetterGrade(score: number): string {
+  if (score >= 90) return "A+";
+  if (score >= 80) return "A";
+  if (score >= 70) return "B";
+  if (score >= 60) return "C";
+  if (score >= 40) return "D";
+  return "F";
+}
+
+// Sends coding/theory answers to the server for semantic AI grading (NOT
+// keyword string-matching). questionWeight is how many overall points each
+// question is worth (e.g. 25 when there are 2 questions worth 50% total).
+async function gradeCodingWithAI(
+  items: { questionText: string; modelSolution: string; studentAnswer: string }[]
+): Promise<CodingGradeItem[]> {
+  try {
+    const res = await fetch("/api/assessments/grade-coding", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items })
+    });
+    if (!res.ok) throw new Error("Grading request failed");
+    const data = await res.json();
+    return items.map((item, idx) => ({
+      ...item,
+      score: data.results[idx]?.score ?? 0,
+      isCorrect: data.results[idx]?.isCorrect ?? false,
+      feedback: data.results[idx]?.feedback ?? ""
+    }));
+  } catch (e) {
+    // If the AI grading call itself fails (network issue etc.), give partial
+    // credit for a substantive attempt rather than losing the submission.
+    return items.map((item) => ({
+      ...item,
+      score: item.studentAnswer.trim().length > 15 ? 40 : 0,
+      isCorrect: false,
+      feedback: "Automatic grading was temporarily unavailable; this answer received partial credit for a substantive attempt."
+    }));
+  }
+}
+
 export default function StudentAssessmentsView({
   student,
   submissions,
@@ -46,7 +99,7 @@ export default function StudentAssessmentsView({
   const [schedMCQAnswers, setSchedMCQAnswers] = useState<Record<number, number>>({});
   const [schedCodingAnswers, setSchedCodingAnswers] = useState<Record<number, string>>({});
   const [schedCurrentMCQIndex, setSchedCurrentMCQIndex] = useState<number>(0);
-  const [schedResult, setSchedResult] = useState<{ score: number; passed: boolean } | null>(null);
+  const [schedResult, setSchedResult] = useState<{ score: number; passed: boolean; grade: string; codingBreakdown: CodingGradeItem[] } | null>(null);
 
   // In-progress test states
   const [currentMCQIndex, setCurrentMCQIndex] = useState(0);
@@ -105,7 +158,10 @@ export default function StudentAssessmentsView({
     passed: boolean;
     mcqScore: number;
     codingScore: number;
+    grade: string;
+    codingBreakdown: CodingGradeItem[];
   } | null>(null);
+  const [isGradingCoding, setIsGradingCoding] = useState(false);
 
   // Simple checks helper
   const getSubjectCompletionStatus = (slug: string) => {
@@ -174,6 +230,7 @@ export default function StudentAssessmentsView({
     }
 
     setIsSubmitting(true);
+    setIsGradingCoding(true);
     setErrorMessage(null);
 
     // Calculate score: 50% max for MCQs, 50% max for coding splits
@@ -191,28 +248,24 @@ export default function StudentAssessmentsView({
       mcqScorePct = 50; // default full marks if no MCQs requested
     }
 
+    // Coding/theory answers graded semantically by AI — comparing meaning
+    // and correctness against the model solution — rather than by checking
+    // for specific keyword substrings.
     let codingScorePct = 0;
+    let schedCodingBreakdown: CodingGradeItem[] = [];
     const codingCount = activeSched.coding?.length || 0;
     if (codingCount > 0) {
-      let acceptedCodingCount = 0;
-      activeSched.coding.forEach((codeQ: any, idx: number) => {
-        const textCode = schedCodingAnswers[idx] || "";
-        if (textCode.length > 15) {
-          const matchedKeywords = (codeQ.expectedKeywords || []).filter((k: string) => textCode.includes(k));
-          const matchRatio = codeQ.expectedKeywords?.length ? (matchedKeywords.length / codeQ.expectedKeywords.length) : 1;
-          if (matchRatio >= 0.75) {
-            acceptedCodingCount += 1;
-          } else if (matchRatio >= 0.25) {
-            acceptedCodingCount += 0.6;
-          } else {
-            acceptedCodingCount += 0.3; // partial attempt
-          }
-        }
-      });
-      codingScorePct = Math.round((acceptedCodingCount / codingCount) * 50);
+      const codingItems = activeSched.coding.map((codeQ: any, idx: number) => ({
+        questionText: codeQ.questionText,
+        modelSolution: codeQ.solutionDescription || "",
+        studentAnswer: schedCodingAnswers[idx] || ""
+      }));
+      schedCodingBreakdown = await gradeCodingWithAI(codingItems);
+      codingScorePct = Math.round(schedCodingBreakdown.reduce((sum, item) => sum + (item.score / 100) * (50 / codingCount), 0));
     } else {
       codingScorePct = 50; // default full marks if no coding exercises
     }
+    setIsGradingCoding(false);
 
     const finalPercent = mcqScorePct + codingScorePct;
     const isPassed = finalPercent >= 60;
@@ -235,7 +288,9 @@ export default function StudentAssessmentsView({
       if (res.ok) {
         setSchedResult({
           score: finalPercent,
-          passed: isPassed
+          passed: isPassed,
+          grade: scoreToLetterGrade(finalPercent),
+          codingBreakdown: schedCodingBreakdown
         });
         onProgressSubmit(); // refresh student context dynamically
       } else {
@@ -262,10 +317,11 @@ export default function StudentAssessmentsView({
     }
 
     setIsSubmitting(true);
+    setIsGradingCoding(true);
     setErrorMessage(null);
 
     // Calculate score
-    // 5 MCQs = 50% max (10% each)
+    // 5 MCQs = 50% max (10% each) — deterministic, exact-match grading.
     let mcqPoints = 0;
     currentPreset.mcqs.forEach((mcq, idx) => {
       if (selectedMCQ[idx] === mcq.correctOption) {
@@ -273,23 +329,17 @@ export default function StudentAssessmentsView({
       }
     });
 
-    // 2 Coding questions = 50% max (25% each)
-    let codingPoints = 0;
-    currentPreset.coding.forEach((codeQ, idx) => {
-      const ans = codingAnswers[idx] || "";
-      if (ans.trim().length > 15) {
-        // basic keyword verification
-        const matchedKeywords = codeQ.expectedKeywords.filter(k => ans.includes(k));
-        const matchRatio = matchedKeywords.length / codeQ.expectedKeywords.length;
-        if (matchRatio >= 0.75) {
-          codingPoints += 25;
-        } else if (matchRatio >= 0.25) {
-          codingPoints += 15;
-        } else {
-          codingPoints += 8; // small credit for attempting
-        }
-      }
-    });
+    // 2 Coding/theory questions = 50% max (25% each). Graded semantically by
+    // AI — comparing meaning and correctness against the model solution —
+    // rather than by checking for specific keyword substrings.
+    const codingItems = currentPreset.coding.map((codeQ, idx) => ({
+      questionText: codeQ.questionText,
+      modelSolution: codeQ.solutionDescription,
+      studentAnswer: codingAnswers[idx] || ""
+    }));
+    const codingBreakdown = await gradeCodingWithAI(codingItems);
+    setIsGradingCoding(false);
+    const codingPoints = Math.round(codingBreakdown.reduce((sum, item) => sum + (item.score / 100) * 25, 0));
 
     const finalScore = mcqPoints + codingPoints;
     const passed = finalScore >= 60;
@@ -313,7 +363,9 @@ export default function StudentAssessmentsView({
           score: finalScore,
           passed,
           mcqScore: mcqPoints,
-          codingScore: codingPoints
+          codingScore: codingPoints,
+          grade: scoreToLetterGrade(finalScore),
+          codingBreakdown
         });
         setStep("quiz");
         onProgressSubmit(); // refresh context
@@ -488,11 +540,17 @@ export default function StudentAssessmentsView({
             Your custom {activeSched.testType} examination answer script for <strong>{activeSched.title}</strong> was successfully gathered and calculated in databases.
           </p>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 py-4 border-y border-slate-100 font-mono text-center max-w-md mx-auto">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 py-4 border-y border-slate-100 font-mono text-center max-w-2xl mx-auto">
             <div className="bg-slate-50 p-4 rounded-xl border border-slate-150">
               <span className="text-[10px] text-slate-400 block uppercase font-bold tracking-wider mb-1 font-mono">My Score</span>
               <span className={`text-2xl font-black ${schedResult.passed ? "text-emerald-600" : "text-amber-600"}`}>
                 {schedResult.score}%
+              </span>
+            </div>
+            <div className="bg-slate-50 p-4 rounded-xl border border-slate-150">
+              <span className="text-[10px] text-slate-400 block uppercase font-bold tracking-wider mb-1 font-mono">Grade</span>
+              <span className={`text-2xl font-black ${schedResult.passed ? "text-emerald-600" : "text-amber-600"}`}>
+                {schedResult.grade}
               </span>
             </div>
             <div className="bg-slate-50 p-4 rounded-xl border border-slate-150 flex flex-col justify-center items-center">
@@ -502,6 +560,38 @@ export default function StudentAssessmentsView({
               </span>
             </div>
           </div>
+
+          {schedResult.codingBreakdown.length > 0 && (
+            <div className="text-left max-w-2xl mx-auto space-y-4 pt-2">
+              <h5 className="text-xs font-black uppercase tracking-wide text-amber-950 font-mono border-b pb-2">
+                AI-Graded Answer Review (semantic grading, not keyword matching)
+              </h5>
+              {schedResult.codingBreakdown.map((item, idx) => (
+                <div key={idx} className="bg-slate-50/50 p-5 rounded-xl border border-slate-200 space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="font-bold text-slate-900 text-xs">Question {idx + 1}</span>
+                    <span className={`text-xs font-black font-mono px-2 py-0.5 rounded ${item.isCorrect ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                      {item.score}%
+                    </span>
+                  </div>
+                  <p className="font-bold text-slate-950 text-sm leading-relaxed">{item.questionText}</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold text-slate-500 block uppercase font-mono">Your Answer</span>
+                      <pre className="w-full bg-white text-slate-700 font-mono text-[11px] p-3 rounded-lg border border-slate-200 overflow-x-auto whitespace-pre-wrap leading-relaxed">{item.studentAnswer || "(no answer submitted)"}</pre>
+                    </div>
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold text-emerald-800 block uppercase font-mono">Model Solution</span>
+                      <pre className="w-full bg-slate-900 text-emerald-300 font-mono text-[11px] p-3 rounded-lg border-none overflow-x-auto whitespace-pre-wrap leading-relaxed">{item.modelSolution}</pre>
+                    </div>
+                  </div>
+                  <div className="bg-amber-50 border border-amber-150 rounded-lg p-2.5 text-[11px] text-amber-900 leading-relaxed">
+                    <strong>AI Feedback:</strong> {item.feedback}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="p-4 rounded-xl border text-xs leading-relaxed max-w-lg mx-auto bg-slate-50 border-slate-200 text-left">
             <h5 className="font-bold text-slate-900 mb-1">Syllabus Evaluation Completion:</h5>
@@ -687,7 +777,7 @@ export default function StudentAssessmentsView({
                   : "bg-amber-650 hover:bg-amber-700 cursor-pointer"
               }`}
             >
-              {isSubmitting ? "Uploading Answers..." : "Submit Finished Script"}
+              {isGradingCoding ? "AI Grading Your Answers..." : isSubmitting ? "Uploading Answers..." : "Submit Finished Script"}
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>
@@ -716,11 +806,17 @@ export default function StudentAssessmentsView({
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 py-4 border-y border-slate-100 font-mono text-center">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 py-4 border-y border-slate-100 font-mono text-center">
             <div className="bg-slate-50 p-4 rounded-xl border border-slate-150">
               <span className="text-[10px] text-slate-400 block uppercase font-bold tracking-wider mb-1">Total Score</span>
               <span className={`text-2xl font-black ${finishedQuizResult.passed ? "text-emerald-600" : "text-amber-600"}`}>
                 {finishedQuizResult.score}%
+              </span>
+            </div>
+            <div className="bg-slate-50 p-4 rounded-xl border border-slate-150">
+              <span className="text-[10px] text-slate-400 block uppercase font-bold tracking-wider mb-1">Grade</span>
+              <span className={`text-2xl font-black ${finishedQuizResult.passed ? "text-emerald-600" : "text-amber-600"}`}>
+                {finishedQuizResult.grade}
               </span>
             </div>
             <div className="bg-slate-50 p-4 rounded-xl border border-slate-150">
@@ -736,6 +832,38 @@ export default function StudentAssessmentsView({
               </span>
             </div>
           </div>
+
+          {finishedQuizResult.codingBreakdown.length > 0 && (
+            <div className="text-left space-y-4 pt-2">
+              <h5 className="text-xs font-black uppercase tracking-wide text-amber-950 font-mono border-b pb-2">
+                AI-Graded Answer Review (semantic grading, not keyword matching)
+              </h5>
+              {finishedQuizResult.codingBreakdown.map((item, idx) => (
+                <div key={idx} className="bg-slate-50/50 p-5 rounded-xl border border-slate-200 space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="font-bold text-slate-900 text-xs">Coding challenge #{idx + 1}</span>
+                    <span className={`text-xs font-black font-mono px-2 py-0.5 rounded ${item.isCorrect ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                      {item.score}%
+                    </span>
+                  </div>
+                  <p className="font-bold text-slate-950 text-sm leading-relaxed">{item.questionText}</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold text-slate-500 block uppercase font-mono">Your Answer</span>
+                      <pre className="w-full bg-white text-slate-700 font-mono text-[11px] p-3 rounded-lg border border-slate-200 overflow-x-auto whitespace-pre-wrap leading-relaxed">{item.studentAnswer || "(no answer submitted)"}</pre>
+                    </div>
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold text-emerald-800 block uppercase font-mono">Model Solution</span>
+                      <pre className="w-full bg-slate-900 text-emerald-300 font-mono text-[11px] p-3 rounded-lg border-none overflow-x-auto whitespace-pre-wrap leading-relaxed">{item.modelSolution}</pre>
+                    </div>
+                  </div>
+                  <div className="bg-amber-50 border border-amber-150 rounded-lg p-2.5 text-[11px] text-amber-900 leading-relaxed">
+                    <strong>AI Feedback:</strong> {item.feedback}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="p-4 rounded-xl border flex gap-3 items-center text-xs leading-relaxed max-w-xl mx-auto bg-slate-50 border-slate-200">
             {finishedQuizResult.passed ? (
@@ -935,7 +1063,7 @@ export default function StudentAssessmentsView({
                   : "bg-amber-650 hover:bg-amber-700 cursor-pointer"
               }`}
             >
-              {isSubmitting ? "Evaluating Submissions..." : "Submit Completed Assessment"}
+              {isGradingCoding ? "AI Grading Your Answers..." : isSubmitting ? "Evaluating Submissions..." : "Submit Completed Assessment"}
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>
