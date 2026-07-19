@@ -66,7 +66,79 @@ interface AtsResumeMakerProps {
   student: Student;
 }
 
+// Per-role starter content. Selecting a role and clicking "Apply Template"
+// fills in a role-appropriate headline, professional summary, and skill set
+// that the student can then edit further — this is how one student profile
+// can produce a differently-tailored resume for each job they apply to.
+const JOB_ROLE_TEMPLATES: Record<string, { label: string; headline: string; summary: string; skills: string }> = {
+  data_analyst: {
+    label: "Data Analyst",
+    headline: "Data Analyst",
+    summary: "Detail-oriented Data Analyst with a strong foundation in SQL, Excel, and Python for extracting actionable insights from complex datasets. Skilled in building interactive dashboards and statistical reports that drive data-informed business decisions. Adept at translating stakeholder requirements into clear, visual analytics.",
+    skills: "SQL, Excel, Python, Pandas, Power BI, Tableau, Data Cleaning, Statistical Analysis, A/B Testing, Data Visualization, Dashboarding, Google Sheets"
+  },
+  data_scientist: {
+    label: "Data Scientist",
+    headline: "Data Scientist & ML Engineer",
+    summary: "Dedicated and analytical aspiring Data Scientist with robust foundational training in Python, Machine Learning models, and Pandas analytics. Demonstrated experience building high-accuracy predictive pipelines and generative AI solutions in academic contexts. Eager to leverage technical rigor to solve complex real-world data challenges.",
+    skills: "Python, SQL, Pandas, NumPy, Scikit-Learn, TensorFlow, Git, Data Structures, Matplotlib, Seaborn, Machine Learning, Exploratory Data Analysis (EDA)"
+  },
+  ai_ml_engineer: {
+    label: "AI / ML Engineer",
+    headline: "AI/ML Engineer",
+    summary: "Motivated AI/ML Engineer with hands-on experience building, training, and deploying machine learning and deep learning models. Skilled in NLP, computer vision, and generative AI techniques including LLMs and RAG pipelines. Focused on shipping production-ready, well-evaluated models.",
+    skills: "Python, PyTorch, TensorFlow, Scikit-Learn, NLP, Computer Vision, Generative AI, LLMs, LangChain, MLOps, Docker, REST APIs, Git"
+  },
+  python_developer: {
+    label: "Python Full Stack Developer",
+    headline: "Python Full Stack Developer",
+    summary: "Full Stack Developer skilled in building scalable web applications using Python, Django/Flask, and React. Experienced in designing REST APIs, integrating databases, and delivering responsive, production-ready features end to end.",
+    skills: "Python, Django, Flask, REST APIs, React, JavaScript, HTML, CSS, SQL, PostgreSQL, Git, Docker"
+  },
+  java_developer: {
+    label: "Java Full Stack Developer",
+    headline: "Java Full Stack Developer",
+    summary: "Java Full Stack Developer with strong fundamentals in Core Java, Spring Boot, and Hibernate, paired with front-end experience in React. Experienced in designing REST APIs, working with relational databases, and delivering maintainable, well-tested enterprise features.",
+    skills: "Java, Spring Boot, Spring MVC, Hibernate, REST APIs, React, SQL, MySQL, Git, Maven, JUnit"
+  },
+  mern_developer: {
+    label: "MERN Stack Developer",
+    headline: "MERN Stack Developer",
+    summary: "MERN Stack Developer experienced in building full-stack JavaScript applications using MongoDB, Express, React, and Node.js. Comfortable working across the stack, from schema design to responsive UI, with a focus on clean, maintainable code.",
+    skills: "MongoDB, Express.js, React, Node.js, JavaScript, REST APIs, Redux, Git, HTML, CSS, Tailwind CSS"
+  },
+  cyber_security_analyst: {
+    label: "Cyber Security Analyst",
+    headline: "Cyber Security Analyst",
+    summary: "Security-focused analyst with practical training in network security, ethical hacking, and vulnerability assessment. Experienced with SOC operations and penetration testing fundamentals, with a strong understanding of common attack vectors and mitigation strategies.",
+    skills: "Network Security, Ethical Hacking, Penetration Testing, SOC Operations, Cloud Security, Nmap, Wireshark, Linux, SIEM Basics, Vulnerability Assessment"
+  },
+  cloud_engineer: {
+    label: "Cloud / GCP Engineer",
+    headline: "Cloud Engineer (GCP)",
+    summary: "Cloud Engineer with foundational experience across Google Cloud Platform, including Compute Engine, GKE, and BigQuery. Skilled in deploying and managing cloud infrastructure, with growing experience in CI/CD and DevOps practices.",
+    skills: "Google Cloud Platform, Compute Engine, Kubernetes Engine (GKE), BigQuery, Cloud Functions, Docker, CI/CD, Linux, Terraform Basics, Git"
+  }
+};
+
 export default function AtsResumeMaker({ student }: AtsResumeMakerProps) {
+  const [targetRole, setTargetRole] = useState<string>("data_scientist");
+
+  const applyRoleTemplate = () => {
+    const template = JOB_ROLE_TEMPLATES[targetRole];
+    if (!template) return;
+    const proceed = window.confirm(
+      `This will replace your current Headline, Summary, and Skills with a template tailored for "${template.label}". Your name, contact info, experience, projects, and education will not be touched. Continue?`
+    );
+    if (!proceed) return;
+    setResume(prev => ({
+      ...prev,
+      headline: template.headline,
+      summary: template.summary,
+      skills: template.skills
+    }));
+  };
+
   // Load initial data with student presets if available
   const [resume, setResume] = useState<ResumeData>({
     fullName: student.name || "",
@@ -540,6 +612,37 @@ export default function AtsResumeMaker({ student }: AtsResumeMakerProps) {
               <User className="w-4 h-4 text-orange-600" />
               Primary Contact & Headline Info
             </h4>
+
+            {/* Job-role tailoring: pick a target role, apply its template, then
+                fine-tune the wording. Lets a student keep one profile but
+                produce a differently-tailored resume for each job they apply to. */}
+            <div className="bg-orange-50 border border-orange-150 rounded-xl p-4 space-y-2">
+              <label className="text-[10.5px] font-mono font-bold text-orange-700 uppercase flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5" /> Tailor Resume For Job Role
+              </label>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <select
+                  value={targetRole}
+                  onChange={(e) => setTargetRole(e.target.value)}
+                  className="flex-1 bg-white border border-orange-200 rounded-lg py-2 px-3 text-xs font-semibold text-slate-800 focus:border-orange-500 outline-none cursor-pointer"
+                >
+                  {Object.entries(JOB_ROLE_TEMPLATES).map(([key, tpl]) => (
+                    <option key={key} value={key}>{tpl.label}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={applyRoleTemplate}
+                  className="bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold py-2 px-4 rounded-lg transition whitespace-nowrap cursor-pointer"
+                >
+                  Apply Template
+                </button>
+              </div>
+              <p className="text-[10px] text-orange-700/80 leading-relaxed">
+                Fills in a headline, summary, and skill list tailored to the selected role. Your name, contact info, experience, projects, and education stay as you entered them — edit the filled-in text afterward to match your own background.
+              </p>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-1">
                 <label className="text-[10.5px] font-mono font-bold text-slate-500 uppercase">Full Name</label>
