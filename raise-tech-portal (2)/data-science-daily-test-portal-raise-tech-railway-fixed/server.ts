@@ -10,7 +10,6 @@ import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, getDocFromServer } from "firebase/firestore";
 
 const app = express();
-app.set("trust proxy", true);
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 
 app.use(express.json({ limit: "20mb" }));
@@ -93,9 +92,6 @@ interface AppDatabase {
   scheduledTests?: any[];
   scheduledSubmissions?: any[];
   recordedVideos?: any[];
-  // Tracks failed teacher-login attempts per client, keyed by IP address, so a
-  // lockout survives server restarts (not just an in-memory counter).
-  teacherLoginSecurity?: Record<string, { attempts: number; lockedUntil: number | null }>;
 }
 
 const DEFAULT_DB: AppDatabase = {
@@ -339,78 +335,13 @@ function writeDB(data: AppDatabase) {
 }
 
 // 1. Teacher password verification
-// Security: after 3 incorrect password attempts from the same client, that
-// client is locked out of the teacher login for 24 hours. The lockout is
-// tracked server-side (per IP, persisted in the DB) so it can't be bypassed
-// by refreshing the page or clearing client-side state.
-const TEACHER_LOGIN_MAX_ATTEMPTS = 3;
-const TEACHER_LOGIN_LOCK_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
-
-function getClientKey(req: express.Request): string {
-  const forwarded = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim();
-  return forwarded || req.ip || "unknown-client";
-}
-
 app.post("/api/auth/teacher", (req, res) => {
   const { password } = req.body;
-  const db = readDB();
-  if (!db.teacherLoginSecurity) db.teacherLoginSecurity = {};
-
-  const clientKey = getClientKey(req);
-  const entry = db.teacherLoginSecurity[clientKey] || { attempts: 0, lockedUntil: null };
-
-  // Still inside an active lockout window -> reject immediately, don't check the password.
-  if (entry.lockedUntil && Date.now() < entry.lockedUntil) {
-    const remainingMs = entry.lockedUntil - Date.now();
-    const remainingHours = Math.max(1, Math.ceil(remainingMs / (60 * 60 * 1000)));
-    res.status(429).json({
-      success: false,
-      locked: true,
-      lockedUntil: entry.lockedUntil,
-      error: `Too many incorrect attempts. Teacher login is locked for approximately ${remainingHours} more hour(s).`
-    });
-    return;
-  }
-
-  // Lockout window has expired -> reset the counter before evaluating this attempt.
-  if (entry.lockedUntil && Date.now() >= entry.lockedUntil) {
-    entry.attempts = 0;
-    entry.lockedUntil = null;
-  }
-
   if (password === "vinay@2003") {
-    entry.attempts = 0;
-    entry.lockedUntil = null;
-    db.teacherLoginSecurity[clientKey] = entry;
-    writeDB(db);
     res.json({ success: true, token: "teacher-valid-token-vinay-2003" });
-    return;
+  } else {
+    res.status(401).json({ success: false, error: "Incorrect teacher password" });
   }
-
-  entry.attempts += 1;
-
-  if (entry.attempts >= TEACHER_LOGIN_MAX_ATTEMPTS) {
-    entry.lockedUntil = Date.now() + TEACHER_LOGIN_LOCK_DURATION_MS;
-    db.teacherLoginSecurity[clientKey] = entry;
-    writeDB(db);
-    res.status(429).json({
-      success: false,
-      locked: true,
-      lockedUntil: entry.lockedUntil,
-      error: "Too many incorrect attempts. Teacher login is now locked for 24 hours."
-    });
-    return;
-  }
-
-  db.teacherLoginSecurity[clientKey] = entry;
-  writeDB(db);
-  const remaining = TEACHER_LOGIN_MAX_ATTEMPTS - entry.attempts;
-  res.status(401).json({
-    success: false,
-    locked: false,
-    attemptsRemaining: remaining,
-    error: `Incorrect teacher password. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining before a 24-hour lock.`
-  });
 });
 
 // 2. Fetch complete DB info
@@ -421,7 +352,7 @@ app.get("/api/db", (req, res) => {
 
 // 3. Batches management
 app.post("/api/batches", (req, res) => {
-  const { batchName } = req.body;
+  const { batchName, courseTrack } = req.body;
   if (!batchName || typeof batchName !== "string") {
     res.status(400).json({ error: "Invalid batch name" });
     return;
@@ -434,11 +365,15 @@ app.post("/api/batches", (req, res) => {
   }
   db.batches.push(trimmed);
 
+  const validTracks = ["data-science", "python", "java"];
+  const track = validTracks.includes(courseTrack) ? courseTrack : "data-science";
+
   // Initialize locked course state for new batch
   db.locks[trimmed] = {
     batchName: trimmed,
     unlockedCourses: ["python"],
     unlockedDays: [1, 2],
+    courseTrack: track,
     courseLockState: {
       python: false,
       numpy: true,
@@ -955,6 +890,22 @@ app.post("/api/students/:id/interview-rewrite-permission", (req, res) => {
   }
 });
 
+// 6f. Clear a student's 3-strikes login lockout early (teacher override)
+app.post("/api/students/:id/unlock-login", (req, res) => {
+  const { id } = req.params;
+
+  const db = readDB();
+  const student = db.students.find(s => s.id === id);
+  if (student) {
+    student.failedLoginAttempts = 0;
+    student.loginLockedUntil = undefined;
+    writeDB(db);
+    res.json({ success: true, student, students: db.students });
+  } else {
+    res.status(404).json({ error: "Student not found" });
+  }
+});
+
 // Update student's placement detailed profile links
 app.post("/api/students/:id/placement-details", (req, res) => {
   const { id } = req.params;
@@ -1114,126 +1065,6 @@ async function generateContentWithRetry(ai: any, params: any, retries: number = 
     }
   }
 }
-
-// -----------------------------------------------------------------------
-// AI-based coding/theory answer grading.
-// Replaces plain keyword string-matching with semantic evaluation by Gemini:
-// the model reads the question, the model solution, and the student's actual
-// answer, and judges correctness/understanding rather than checking whether
-// specific substrings appear in the text. Falls back to a conservative
-// length-based heuristic only if the Gemini client isn't configured, so
-// grading never silently fails.
-// -----------------------------------------------------------------------
-interface CodingGradeInput {
-  questionText: string;
-  modelSolution: string;
-  studentAnswer: string;
-}
-interface CodingGradeResult {
-  score: number;       // 0-100 for this question
-  isCorrect: boolean;  // score >= 60
-  feedback: string;    // short, specific, human-readable feedback
-}
-
-async function gradeCodingAnswersWithAI(items: CodingGradeInput[]): Promise<CodingGradeResult[]> {
-  const ai = getAi();
-
-  // Fallback (no Gemini key configured): give partial credit for a
-  // substantive attempt rather than blocking grading entirely. This is
-  // intentionally conservative and only used when AI grading is unavailable.
-  if (!ai) {
-    return items.map((item) => {
-      const attempted = item.studentAnswer.trim().length > 15;
-      return {
-        score: attempted ? 40 : 0,
-        isCorrect: false,
-        feedback: attempted
-          ? "AI grading is temporarily unavailable, so this answer received partial credit for a substantive attempt. Ask your instructor to review it manually."
-          : "No substantive answer was submitted."
-      };
-    });
-  }
-
-  const prompt = `You are grading a student's answers for a technical assessment. For EACH question below, compare the student's answer against the model solution and judge it on SEMANTIC correctness and conceptual understanding — NOT on whether specific keywords or exact code syntax appear in the text. A student can phrase or structure their answer completely differently from the model solution and still be fully correct, and a student can include all the "right words" while fundamentally misunderstanding the concept — grade the actual reasoning and correctness, not surface wording.
-
-Questions:
-${items.map((item, i) => `
---- Question ${i + 1} ---
-Question: ${item.questionText}
-Model Solution: ${item.modelSolution}
-Student's Answer: ${item.studentAnswer || "(no answer submitted)"}
-`).join("\n")}
-
-Return a JSON array with exactly ${items.length} objects, one per question in order, each with:
-- score: integer 0-100 reflecting how semantically correct and complete the student's answer is
-- isCorrect: boolean, true if score >= 60
-- feedback: one or two sentences of specific, constructive feedback referencing what the student actually wrote`;
-
-  try {
-    const response = await generateContentWithRetry(ai, {
-      model: "gemini-3.5-flash",
-      contents: prompt,
-      config: {
-        systemInstruction: "You are a fair, rigorous technical grader. You evaluate meaning and correctness, never simple keyword/string matching. You MUST respond with a JSON array strictly conforming to the requested schema, with exactly one entry per question, in order.",
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              score: { type: Type.INTEGER, description: "0-100 semantic correctness score" },
-              isCorrect: { type: Type.BOOLEAN, description: "true if score >= 60" },
-              feedback: { type: Type.STRING, description: "Short specific constructive feedback" }
-            },
-            required: ["score", "isCorrect", "feedback"]
-          }
-        }
-      }
-    });
-
-    const text = response.text ?? (response.candidates?.[0]?.content?.parts?.[0]?.text ?? "[]");
-    const parsed = JSON.parse(text);
-    if (Array.isArray(parsed) && parsed.length === items.length) {
-      return parsed.map((r: any) => ({
-        score: Math.max(0, Math.min(100, Math.round(Number(r.score) || 0))),
-        isCorrect: !!r.isCorrect,
-        feedback: String(r.feedback || "")
-      }));
-    }
-    throw new Error("Unexpected AI grading response shape.");
-  } catch (e) {
-    console.error("[AI grading] Failed, falling back to partial credit:", e);
-    return items.map((item) => {
-      const attempted = item.studentAnswer.trim().length > 15;
-      return {
-        score: attempted ? 40 : 0,
-        isCorrect: false,
-        feedback: attempted
-          ? "AI grading service encountered an error, so this answer received partial credit for a substantive attempt. Ask your instructor to review it manually."
-          : "No substantive answer was submitted."
-      };
-    });
-  }
-}
-
-// Grades a set of coding/theory answers semantically and returns per-question
-// scores, correctness, and feedback — used by both the Comprehensive
-// Assessment and Scheduled (Weekly/Monthly) Test submit flows so free-text
-// answers are never graded by simple keyword matching.
-app.post("/api/assessments/grade-coding", async (req, res) => {
-  const { items } = req.body as { items: CodingGradeInput[] };
-  if (!Array.isArray(items) || items.length === 0) {
-    res.status(400).json({ error: "No questions supplied for grading." });
-    return;
-  }
-  try {
-    const results = await gradeCodingAnswersWithAI(items);
-    res.json({ success: true, results });
-  } catch (e) {
-    console.error("[POST /api/assessments/grade-coding] error:", e);
-    res.status(500).json({ error: "Failed to grade coding answers." });
-  }
-});
 
 const FALLBACK_QUESTIONS: Record<string, Record<string, string[]>> = {
   technical: {
@@ -1483,7 +1314,7 @@ Candidate Resume Details:
 ${customMaterial || "General Placement Resume Content"}
 --- END RESUME ---`;
     } else {
-      systemInstruction = `You are a professional, expert Data Science Technical Recruiter at "Raise Tech Academy".
+      systemInstruction = `You are a professional, expert Technical Recruiter specialized in the given subject at "Raise Tech Academy".
 Your task is to conduct an interactive, step-by-step oral technical interview with a student on the subject of "${subject}" at "${difficulty}" difficulty.
 
 Follow these strict rules:
@@ -2361,6 +2192,24 @@ app.post("/api/videos", (req, res) => {
     if (videoId) {
       processedUrl = `https://www.youtube.com/embed/${videoId}`;
     }
+  } else if (processedUrl.includes("drive.google.com")) {
+    // Normalize any Google Drive share link format to the embeddable /preview form,
+    // so a teacher can just paste the "Share" link from Drive and have it play inline
+    // instead of only opening in a new tab. Handles:
+    //   https://drive.google.com/file/d/FILE_ID/view?usp=sharing
+    //   https://drive.google.com/open?id=FILE_ID
+    //   https://drive.google.com/uc?id=FILE_ID
+    let fileId: string | null = null;
+    const fileMatch = processedUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+    if (fileMatch) {
+      fileId = fileMatch[1];
+    } else {
+      const idMatch = processedUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+      if (idMatch) fileId = idMatch[1];
+    }
+    if (fileId) {
+      processedUrl = `https://drive.google.com/file/d/${fileId}/preview`;
+    }
   }
 
   const newVideo: VideoAttachment = {
@@ -2420,19 +2269,60 @@ app.post("/api/student/login", (req, res) => {
 
   if (studentIndex !== -1) {
     const student = db.students[studentIndex];
+
+    // Enforce 24-hour lockout after 3 consecutive failed attempts
+    if (student.loginLockedUntil) {
+      const lockedUntilMs = new Date(student.loginLockedUntil).getTime();
+      if (lockedUntilMs > Date.now()) {
+        const minutesLeft = Math.ceil((lockedUntilMs - Date.now()) / 60000);
+        const hoursLeft = Math.floor(minutesLeft / 60);
+        const remMinutes = minutesLeft % 60;
+        const remainingText = hoursLeft > 0 ? `${hoursLeft}h ${remMinutes}m` : `${remMinutes}m`;
+        res.status(403).json({
+          success: false,
+          error: `Account locked due to 3 failed login attempts. Please try again in ${remainingText}, or contact your instructor to unlock it early.`
+        });
+        return;
+      }
+      // Lockout window has passed — clear it and reset the strike counter
+      student.loginLockedUntil = undefined;
+      student.failedLoginAttempts = 0;
+    }
+
     const sPhone = student.phoneNumber ? student.phoneNumber.trim().replace(/\D/g, "") : "";
     
     // If student record has a phone number, check if matches
     if (sPhone && sPhone !== qPhone) {
-      res.status(401).json({ success: false, error: "Authentication failed. The Phone Number does not match the registered record." });
+      const attempts = (student.failedLoginAttempts || 0) + 1;
+      if (attempts >= 3) {
+        student.failedLoginAttempts = 0;
+        student.loginLockedUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        writeDB(db);
+        res.status(403).json({
+          success: false,
+          error: "Authentication failed 3 times. Your account has been locked for 24 hours for security. Please contact your instructor if you need it unlocked sooner."
+        });
+        return;
+      }
+      student.failedLoginAttempts = attempts;
+      writeDB(db);
+      const remaining = 3 - attempts;
+      res.status(401).json({
+        success: false,
+        error: `Authentication failed. The Phone Number does not match the registered record. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining before your account is locked for 24 hours.`
+      });
       return;
     }
+
+    // Successful match (or first-time phone save) — clear any strike count
+    student.failedLoginAttempts = 0;
+    student.loginLockedUntil = undefined;
 
     // Save phone number if empty
     if (!sPhone) {
       student.phoneNumber = qPhone;
-      writeDB(db);
     }
+    writeDB(db);
 
     res.json({
       success: true,
@@ -2624,6 +2514,41 @@ app.post("/api/feature-locks", (req, res) => {
   }
 
   db.locks[batchName].featureLocks[feature] = enabled;
+  writeDB(db);
+  res.json({ success: true, locks: db.locks });
+});
+
+// Update the course track (Data Science / Python / Java) for an existing batch —
+// drives which AI Interview subject list students in that batch see.
+app.post("/api/batches/:batchName/course-track", (req, res) => {
+  const { batchName } = req.params;
+  const { courseTrack } = req.body;
+  const validTracks = ["data-science", "python", "java"];
+  if (!batchName || !validTracks.includes(courseTrack)) {
+    res.status(400).json({ error: "Missing/invalid parameters: batchName param and a valid courseTrack (data-science, python, or java) are required." });
+    return;
+  }
+
+  const db = readDB();
+  db.locks = db.locks || {};
+  if (!db.locks[batchName]) {
+    db.locks[batchName] = {
+      batchName,
+      unlockedCourses: ["python"],
+      unlockedDays: [1, 2],
+      courseLockState: {
+        python: false,
+        numpy: true,
+        pandas: true,
+        ml: true,
+        dl: true,
+        nlp: true,
+        genai: true,
+        eda: true
+      }
+    };
+  }
+  db.locks[batchName].courseTrack = courseTrack;
   writeDB(db);
   res.json({ success: true, locks: db.locks });
 });
