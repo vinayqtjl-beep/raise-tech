@@ -23,6 +23,7 @@ interface StudentAssessmentsViewProps {
   onProgressSubmit: () => void;
   scheduledTests?: any[];
   scheduledSubmissions?: any[];
+  monthlyTestLocked?: boolean;
 }
 
 export default function StudentAssessmentsView({
@@ -32,7 +33,8 @@ export default function StudentAssessmentsView({
   overrides,
   onProgressSubmit,
   scheduledTests = [],
-  scheduledSubmissions = []
+  scheduledSubmissions = [],
+  monthlyTestLocked = false
 }: StudentAssessmentsViewProps) {
   const [activeSlug, setActiveSlug] = useState<string | null>(null);
   const [step, setStep] = useState<"list" | "quiz" | "view-answers" | "scheduled-quiz">("list");
@@ -1086,6 +1088,10 @@ export default function StudentAssessmentsView({
                             </span>
                             <span className="text-[10px] text-slate-400 italic">Submitted {new Date(sub.submittedAt).toLocaleDateString()}</span>
                           </div>
+                        ) : test.testType === "monthly" && monthlyTestLocked ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-mono font-bold text-rose-600 bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-lg">
+                            <Lock className="w-3.5 h-3.5" /> Locked by instructor
+                          </span>
                         ) : test.isActive ? (
                           <button
                             onClick={() => startScheduledAssessment(test)}
