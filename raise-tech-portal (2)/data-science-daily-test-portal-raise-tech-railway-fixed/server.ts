@@ -10,6 +10,7 @@ import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, getDocFromServer } from "firebase/firestore";
 
 const app = express();
+app.set("trust proxy", true);
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 
 app.use(express.json({ limit: "20mb" }));
@@ -92,6 +93,9 @@ interface AppDatabase {
   scheduledTests?: any[];
   scheduledSubmissions?: any[];
   recordedVideos?: any[];
+  // Tracks failed teacher-login attempts per client, keyed by IP address, so a
+  // lockout survives server restarts (not just an in-memory counter).
+  teacherLoginSecurity?: Record<string, { attempts: number; lockedUntil: number | null }>;
 }
 
 const DEFAULT_DB: AppDatabase = {
@@ -335,13 +339,78 @@ function writeDB(data: AppDatabase) {
 }
 
 // 1. Teacher password verification
+// Security: after 3 incorrect password attempts from the same client, that
+// client is locked out of the teacher login for 24 hours. The lockout is
+// tracked server-side (per IP, persisted in the DB) so it can't be bypassed
+// by refreshing the page or clearing client-side state.
+const TEACHER_LOGIN_MAX_ATTEMPTS = 3;
+const TEACHER_LOGIN_LOCK_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function getClientKey(req: express.Request): string {
+  const forwarded = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim();
+  return forwarded || req.ip || "unknown-client";
+}
+
 app.post("/api/auth/teacher", (req, res) => {
   const { password } = req.body;
-  if (password === "vinay@2003") {
-    res.json({ success: true, token: "teacher-valid-token-vinay-2003" });
-  } else {
-    res.status(401).json({ success: false, error: "Incorrect teacher password" });
+  const db = readDB();
+  if (!db.teacherLoginSecurity) db.teacherLoginSecurity = {};
+
+  const clientKey = getClientKey(req);
+  const entry = db.teacherLoginSecurity[clientKey] || { attempts: 0, lockedUntil: null };
+
+  // Still inside an active lockout window -> reject immediately, don't check the password.
+  if (entry.lockedUntil && Date.now() < entry.lockedUntil) {
+    const remainingMs = entry.lockedUntil - Date.now();
+    const remainingHours = Math.max(1, Math.ceil(remainingMs / (60 * 60 * 1000)));
+    res.status(429).json({
+      success: false,
+      locked: true,
+      lockedUntil: entry.lockedUntil,
+      error: `Too many incorrect attempts. Teacher login is locked for approximately ${remainingHours} more hour(s).`
+    });
+    return;
   }
+
+  // Lockout window has expired -> reset the counter before evaluating this attempt.
+  if (entry.lockedUntil && Date.now() >= entry.lockedUntil) {
+    entry.attempts = 0;
+    entry.lockedUntil = null;
+  }
+
+  if (password === "vinay@2003") {
+    entry.attempts = 0;
+    entry.lockedUntil = null;
+    db.teacherLoginSecurity[clientKey] = entry;
+    writeDB(db);
+    res.json({ success: true, token: "teacher-valid-token-vinay-2003" });
+    return;
+  }
+
+  entry.attempts += 1;
+
+  if (entry.attempts >= TEACHER_LOGIN_MAX_ATTEMPTS) {
+    entry.lockedUntil = Date.now() + TEACHER_LOGIN_LOCK_DURATION_MS;
+    db.teacherLoginSecurity[clientKey] = entry;
+    writeDB(db);
+    res.status(429).json({
+      success: false,
+      locked: true,
+      lockedUntil: entry.lockedUntil,
+      error: "Too many incorrect attempts. Teacher login is now locked for 24 hours."
+    });
+    return;
+  }
+
+  db.teacherLoginSecurity[clientKey] = entry;
+  writeDB(db);
+  const remaining = TEACHER_LOGIN_MAX_ATTEMPTS - entry.attempts;
+  res.status(401).json({
+    success: false,
+    locked: false,
+    attemptsRemaining: remaining,
+    error: `Incorrect teacher password. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining before a 24-hour lock.`
+  });
 });
 
 // 2. Fetch complete DB info
@@ -352,7 +421,7 @@ app.get("/api/db", (req, res) => {
 
 // 3. Batches management
 app.post("/api/batches", (req, res) => {
-  const { batchName, courseTrack } = req.body;
+  const { batchName } = req.body;
   if (!batchName || typeof batchName !== "string") {
     res.status(400).json({ error: "Invalid batch name" });
     return;
@@ -365,15 +434,11 @@ app.post("/api/batches", (req, res) => {
   }
   db.batches.push(trimmed);
 
-  const validTracks = ["data-science", "python", "java"];
-  const track = validTracks.includes(courseTrack) ? courseTrack : "data-science";
-
   // Initialize locked course state for new batch
   db.locks[trimmed] = {
     batchName: trimmed,
     unlockedCourses: ["python"],
     unlockedDays: [1, 2],
-    courseTrack: track,
     courseLockState: {
       python: false,
       numpy: true,
@@ -890,22 +955,6 @@ app.post("/api/students/:id/interview-rewrite-permission", (req, res) => {
   }
 });
 
-// 6f. Clear a student's 3-strikes login lockout early (teacher override)
-app.post("/api/students/:id/unlock-login", (req, res) => {
-  const { id } = req.params;
-
-  const db = readDB();
-  const student = db.students.find(s => s.id === id);
-  if (student) {
-    student.failedLoginAttempts = 0;
-    student.loginLockedUntil = undefined;
-    writeDB(db);
-    res.json({ success: true, student, students: db.students });
-  } else {
-    res.status(404).json({ error: "Student not found" });
-  }
-});
-
 // Update student's placement detailed profile links
 app.post("/api/students/:id/placement-details", (req, res) => {
   const { id } = req.params;
@@ -1066,6 +1115,126 @@ async function generateContentWithRetry(ai: any, params: any, retries: number = 
   }
 }
 
+// -----------------------------------------------------------------------
+// AI-based coding/theory answer grading.
+// Replaces plain keyword string-matching with semantic evaluation by Gemini:
+// the model reads the question, the model solution, and the student's actual
+// answer, and judges correctness/understanding rather than checking whether
+// specific substrings appear in the text. Falls back to a conservative
+// length-based heuristic only if the Gemini client isn't configured, so
+// grading never silently fails.
+// -----------------------------------------------------------------------
+interface CodingGradeInput {
+  questionText: string;
+  modelSolution: string;
+  studentAnswer: string;
+}
+interface CodingGradeResult {
+  score: number;       // 0-100 for this question
+  isCorrect: boolean;  // score >= 60
+  feedback: string;    // short, specific, human-readable feedback
+}
+
+async function gradeCodingAnswersWithAI(items: CodingGradeInput[]): Promise<CodingGradeResult[]> {
+  const ai = getAi();
+
+  // Fallback (no Gemini key configured): give partial credit for a
+  // substantive attempt rather than blocking grading entirely. This is
+  // intentionally conservative and only used when AI grading is unavailable.
+  if (!ai) {
+    return items.map((item) => {
+      const attempted = item.studentAnswer.trim().length > 15;
+      return {
+        score: attempted ? 40 : 0,
+        isCorrect: false,
+        feedback: attempted
+          ? "AI grading is temporarily unavailable, so this answer received partial credit for a substantive attempt. Ask your instructor to review it manually."
+          : "No substantive answer was submitted."
+      };
+    });
+  }
+
+  const prompt = `You are grading a student's answers for a technical assessment. For EACH question below, compare the student's answer against the model solution and judge it on SEMANTIC correctness and conceptual understanding — NOT on whether specific keywords or exact code syntax appear in the text. A student can phrase or structure their answer completely differently from the model solution and still be fully correct, and a student can include all the "right words" while fundamentally misunderstanding the concept — grade the actual reasoning and correctness, not surface wording.
+
+Questions:
+${items.map((item, i) => `
+--- Question ${i + 1} ---
+Question: ${item.questionText}
+Model Solution: ${item.modelSolution}
+Student's Answer: ${item.studentAnswer || "(no answer submitted)"}
+`).join("\n")}
+
+Return a JSON array with exactly ${items.length} objects, one per question in order, each with:
+- score: integer 0-100 reflecting how semantically correct and complete the student's answer is
+- isCorrect: boolean, true if score >= 60
+- feedback: one or two sentences of specific, constructive feedback referencing what the student actually wrote`;
+
+  try {
+    const response = await generateContentWithRetry(ai, {
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        systemInstruction: "You are a fair, rigorous technical grader. You evaluate meaning and correctness, never simple keyword/string matching. You MUST respond with a JSON array strictly conforming to the requested schema, with exactly one entry per question, in order.",
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              score: { type: Type.INTEGER, description: "0-100 semantic correctness score" },
+              isCorrect: { type: Type.BOOLEAN, description: "true if score >= 60" },
+              feedback: { type: Type.STRING, description: "Short specific constructive feedback" }
+            },
+            required: ["score", "isCorrect", "feedback"]
+          }
+        }
+      }
+    });
+
+    const text = response.text ?? (response.candidates?.[0]?.content?.parts?.[0]?.text ?? "[]");
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed) && parsed.length === items.length) {
+      return parsed.map((r: any) => ({
+        score: Math.max(0, Math.min(100, Math.round(Number(r.score) || 0))),
+        isCorrect: !!r.isCorrect,
+        feedback: String(r.feedback || "")
+      }));
+    }
+    throw new Error("Unexpected AI grading response shape.");
+  } catch (e) {
+    console.error("[AI grading] Failed, falling back to partial credit:", e);
+    return items.map((item) => {
+      const attempted = item.studentAnswer.trim().length > 15;
+      return {
+        score: attempted ? 40 : 0,
+        isCorrect: false,
+        feedback: attempted
+          ? "AI grading service encountered an error, so this answer received partial credit for a substantive attempt. Ask your instructor to review it manually."
+          : "No substantive answer was submitted."
+      };
+    });
+  }
+}
+
+// Grades a set of coding/theory answers semantically and returns per-question
+// scores, correctness, and feedback — used by both the Comprehensive
+// Assessment and Scheduled (Weekly/Monthly) Test submit flows so free-text
+// answers are never graded by simple keyword matching.
+app.post("/api/assessments/grade-coding", async (req, res) => {
+  const { items } = req.body as { items: CodingGradeInput[] };
+  if (!Array.isArray(items) || items.length === 0) {
+    res.status(400).json({ error: "No questions supplied for grading." });
+    return;
+  }
+  try {
+    const results = await gradeCodingAnswersWithAI(items);
+    res.json({ success: true, results });
+  } catch (e) {
+    console.error("[POST /api/assessments/grade-coding] error:", e);
+    res.status(500).json({ error: "Failed to grade coding answers." });
+  }
+});
+
 const FALLBACK_QUESTIONS: Record<string, Record<string, string[]>> = {
   technical: {
     python: [
@@ -1106,7 +1275,7 @@ const FALLBACK_QUESTIONS: Record<string, Record<string, string[]>> = {
   },
   hr: {
     general: [
-      "Hello! Welcome to your HR and Behavioral interview. Let's start: Tell me about yourself, your academic background at Raise Tech Academy, and your primary career aspirations. (Question 1 of 5)",
+      "Hello! Welcome to your HR and Behavioral interview. Let's start: Tell me about yourself, your academic background at Quality Thought Academy, and your primary career aspirations. (Question 1 of 5)",
       "That's lovely to hear. Question 2 of 5: Tell me about a time when you had to work in a team to complete a project under a tight deadline. How did you organize the work, and how did you resolve any differences or conflicts? (Question 2 of 5)",
       "Thank you for sharing that experience. Question 3 of 5: How do you handle pressure, stress, or sudden changes in project specifications? Can you give me a specific real-world example? (Question 3 of 5)",
       "I appreciate your resilience. Question 4 of 5: What are your greatest professional strengths and your biggest areas of improvement, and what steps have you taken recently to address those growth areas? (Question 4 of 5)",
@@ -1260,7 +1429,7 @@ app.post("/api/interview/chat", async (req, res) => {
   let systemInstruction = "";
 
   if (roundType === "hr") {
-    systemInstruction = `You are an elite, warm, highly empathetic and professional Human Resources Director and Chief Talent Officer at "Raise Tech Academy".
+    systemInstruction = `You are an elite, warm, highly empathetic and professional Human Resources Director and Chief Talent Officer at "Quality Thought Academy".
 Your task is to conduct an interactive, step-by-step oral HR and behavioral interview with a student candidate at "${difficulty}" level.
 
 Follow these strict rules:
@@ -1277,7 +1446,7 @@ ${isResume ? `Candidate Resume Details to customize questions:
 ${customMaterial || "General Resume details"}
 --- END RESUME ---` : ""}`;
   } else if (roundType === "combined") {
-    systemInstruction = `You are an elite Senior Director of Engineering and HR Acquisition at "Raise Tech Academy".
+    systemInstruction = `You are an elite Senior Director of Engineering and HR Acquisition at "Quality Thought Academy".
 Your task is to conduct an interactive, step-by-step oral combined (Technical + HR) placement interview with a student candidate on the subject of "${subject}" at "${difficulty}" difficulty.
 
 Follow these strict rules:
@@ -1297,7 +1466,7 @@ ${customMaterial}
   } else {
     // Technical round (standard/resume based)
     if (isResume) {
-      systemInstruction = `You are an elite, highly professional Data Science Technical Recruiter at "Raise Tech Academy".
+      systemInstruction = `You are an elite, highly professional Data Science Technical Recruiter at "Quality Thought Academy".
 Your task is to conduct an interactive, step-by-step oral technical interview with a student candidate on the subject of data science, tailored specifically based on their RESUME at "${difficulty}" difficulty.
 
 Follow these strict rules:
@@ -1314,7 +1483,7 @@ Candidate Resume Details:
 ${customMaterial || "General Placement Resume Content"}
 --- END RESUME ---`;
     } else {
-      systemInstruction = `You are a professional, expert Technical Recruiter specialized in the given subject at "Raise Tech Academy".
+      systemInstruction = `You are a professional, expert Data Science Technical Recruiter at "Quality Thought Academy".
 Your task is to conduct an interactive, step-by-step oral technical interview with a student on the subject of "${subject}" at "${difficulty}" difficulty.
 
 Follow these strict rules:
@@ -1445,6 +1614,8 @@ Evaluate the candidate's responses meticulously.
 - Calculate a general cumulative score out of 100.
 - Provide highly descriptive, constructive, human-like pattern feedback, key strengths, improvement areas, specialized HR behavioral suggestions, and technical coding/engineering study guidelines.
 - Generate standard Voice Quality Metrics ('voiceAnalysis') based on their transcript dynamics.
+- Build a per-question breakdown ('questionBreakdown'): for every interviewer question found in the transcript, pair it with what the candidate actually said, write the ideal/model solution a strong candidate would have given, and grade that single answer 0-100.
+  IMPORTANT GRADING RULE: grade each answer by whether it demonstrates correct UNDERSTANDING and captures the same MEANING as the ideal solution — not by whether it contains specific keywords or exact phrases from the ideal solution. A correct answer phrased in the candidate's own words, using synonyms, different terminology, or a different valid approach, must score just as high as one that happens to reuse the ideal solution's wording. Conversely, an answer that repeats keywords from the ideal solution without demonstrating real understanding must score low. Judge conceptual correctness and completeness, never literal word overlap.
 
 Transcript:
 """
@@ -1452,7 +1623,8 @@ ${transcript}
 """`;
 
   const systemInstruction = `You are an expert high-level placement recruitment board panel and executive evaluation system.
-You inspect transcripts of student mock interviews (including HR, Technical, or Combined placement rounds) and output constructive pattern analysis, dual-track scores (Technical and HR), detailed improvement suggestions, and comprehensive speech/voice delivery diagnostics.
+You inspect transcripts of student mock interviews (including HR, Technical, or Combined placement rounds) and output constructive pattern analysis, dual-track scores (Technical and HR), a per-question correctness breakdown, detailed improvement suggestions, and comprehensive speech/voice delivery diagnostics.
+When grading each answer, you evaluate semantic correctness and depth of understanding only. You NEVER grade by matching keywords, exact phrases, or wording overlap against a model answer — a conceptually correct answer in different words scores exactly as well as one using the model answer's own terms.
 You MUST respond with a JSON object strictly conforming to the requested schema.`;
 
   try {
@@ -1509,6 +1681,21 @@ You MUST respond with a JSON object strictly conforming to the requested schema.
               type: Type.STRING,
               description: "In-depth markdown content detailing correctness of replies, conceptual clarity, correct answers where candidate failed, and exact custom recommendations."
             },
+            questionBreakdown: {
+              type: Type.ARRAY,
+              description: "One entry per interviewer question in the transcript, comparing the candidate's given answer against the ideal solution with a percentage grade.",
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  question: { type: Type.STRING, description: "The interviewer's question, as asked." },
+                  givenAnswer: { type: Type.STRING, description: "A faithful summary of what the candidate actually answered." },
+                  idealSolution: { type: Type.STRING, description: "The correct/ideal model answer a strong candidate would give." },
+                  matchPercentage: { type: Type.INTEGER, description: "0-100 grade for this single answer, based on conceptual/semantic correctness against the ideal solution — never based on keyword or wording overlap." },
+                  verdict: { type: Type.STRING, description: "One of: 'Correct', 'Partially Correct', 'Incorrect'." }
+                },
+                required: ["question", "givenAnswer", "idealSolution", "matchPercentage", "verdict"]
+              }
+            },
             voiceAnalysis: {
               type: Type.OBJECT,
               description: "Comprehensive voice and speech analytics deduced from the transcript content, word choices, length, and flow.",
@@ -1525,7 +1712,7 @@ You MUST respond with a JSON object strictly conforming to the requested schema.
               required: ["paceWpm", "paceStatus", "clarityScore", "modulationStatus", "fillersDetected", "fillerCount", "mistakes", "improvements"]
             }
           },
-          required: ["score", "technicalScore", "hrScore", "patternAnalysis", "summary", "strengths", "improvements", "hrSuggestions", "techSuggestions", "detailedEvaluation", "voiceAnalysis"]
+          required: ["score", "technicalScore", "hrScore", "patternAnalysis", "summary", "strengths", "improvements", "hrSuggestions", "techSuggestions", "detailedEvaluation", "questionBreakdown", "voiceAnalysis"]
         }
       }
     });
@@ -1736,7 +1923,7 @@ app.post("/api/careers/analyze-resume", async (req, res) => {
     return;
   }
 
-  const prompt = `You are an elite Data Science Career Consultant at "Raise Tech Academy".
+  const prompt = `You are an elite Data Science Career Consultant at "Quality Thought Academy".
 Your task is to analyze the following candidate resume text and provide structured career matching insights.
 
 Resume Content:
@@ -1837,7 +2024,7 @@ interface ResumeAnalysisResult {
 // real sources (LinkedIn, Naukri, Indeed, Instahyre, Wellfound, company career pages, etc.)
 // instead of generic search-query URLs.
 app.post("/api/careers/live-jobs", async (req, res) => {
-  const { skills, roleQuery, resumeText, location } = req.body;
+  const { skills, roleQuery, resumeText, location, placementDetails } = req.body;
 
   const ai = getAi();
   if (!ai) {
@@ -1849,7 +2036,34 @@ app.post("/api/careers/live-jobs", async (req, res) => {
   const focusQuery = roleQuery || skillsList || "Python Data Science Entry Level";
   const targetLocation = location || "Hyderabad, India";
 
-  const prompt = `You are a live job-search research assistant for "Raise Tech Academy" students.
+  // Map the student's saved placement-portal profile links to friendly portal names.
+  // A student may have filled in only 1 or 2 of these (or all 10) — whatever they've
+  // provided is exactly what gets searched. There is no minimum count required.
+  const PORTAL_LABELS: Record<string, string> = {
+    linkedin: "LinkedIn",
+    indeed: "Indeed",
+    naukri: "Naukri.com",
+    glassdoor: "Glassdoor",
+    foundit: "Foundit",
+    shine: "Shine.com",
+    timesjobs: "TimesJobs",
+    internshala: "Internshala",
+    wellfound: "Wellfound (AngelList)",
+    apna: "Apna App",
+  };
+  const filledPortals: string[] = placementDetails && typeof placementDetails === "object"
+    ? Object.entries(placementDetails)
+        .filter(([key, val]) => typeof val === "string" && val.trim().length > 0 && PORTAL_LABELS[key])
+        .map(([key]) => PORTAL_LABELS[key])
+    : [];
+
+  // If the student hasn't filled in any portal profiles yet, fall back to a broad default
+  // set so the search still works — filled-in portals are simply prioritized, never required.
+  const portalsToSearch = filledPortals.length > 0
+    ? filledPortals
+    : ["LinkedIn", "Naukri.com", "Indeed", "Instahyre", "Wellfound (AngelList)"];
+
+  const prompt = `You are a live job-search research assistant for "Quality Thought Academy" students.
 
 Use Google Search to find 6-8 REAL, currently open job postings that closely match this candidate profile:
 - Target role / keywords: "${focusQuery}"
@@ -1857,7 +2071,7 @@ Use Google Search to find 6-8 REAL, currently open job postings that closely mat
 - Location preference: "${targetLocation}" (include a couple of remote/India-wide roles too if relevant)
 ${resumeText ? `- Additional resume context: """${String(resumeText).slice(0, 1500)}"""` : ""}
 
-Search across LinkedIn Jobs, Naukri.com, Indeed, Instahyre, Wellfound (AngelList), and official company career pages.
+Search across these portals the student has active profiles on${filledPortals.length > 0 ? "" : " (default set, since the student hasn't listed specific profiles yet)"}: ${portalsToSearch.join(", ")}, plus official company career pages. It is completely fine if the student only listed one or two portals — search thoroughly across exactly the ones given rather than expecting a full list.
 
 For every result you include, you MUST have actually found it via search — do not invent postings or URLs. Prefer the most direct link available: the company's own careers-page listing if you can find it, otherwise the specific job-board listing page for that exact posting (never a generic search-results page).
 
@@ -1963,7 +2177,7 @@ app.post("/api/careers/build-ats-resume", async (req, res) => {
   if (mlDone >= 2) verifiedTracks.push(`Supervised Machine Learning (Completed ${mlDone}/30 module milestones)`);
 
   const academyStatsText = `
-  Institute: Raise Tech Academy
+  Institute: Quality Thought Academy
   Verified Milestones Completed: ${numCompleted} / 200 Days of daily testing curriculum.
   Academic Evaluation Grade: ${avgScore}% Average accuracy score.
   Earned credentials: ${verifiedTracks.join(", ") || "Data Science Foundations Training Track"}
@@ -2028,7 +2242,7 @@ interface AtsResumeResponse {
     } catch (parseErr) {
       console.warn("[Gemini API] Failed to parse build-resume JSON. Fallback formatting applied.");
       res.json({
-        formattedResume: `${inputs.fullName || student?.name || "Arjun Sharma"}\n${inputs.email || "student@example.com"} | ${inputs.phone || "+91 9000"} | ${inputs.linkedin || "LinkedIn"}\n\nPROFESSIONAL SUMMARY\n${inputs.objective || "Dedicated candidate."}\n\nTECHNICAL SKILLS\n${inputs.topSkills || "Python, NumPy, Pandas, Scikit-Learn"}\n\nEDUCATION & CERTIFICATIONS\n${inputs.educationText || "B.Tech"}\nRaise Tech Academy - Verified Data Science Track (${numCompleted} Completed Milestones).`,
+        formattedResume: `${inputs.fullName || student?.name || "Arjun Sharma"}\n${inputs.email || "student@example.com"} | ${inputs.phone || "+91 9000"} | ${inputs.linkedin || "LinkedIn"}\n\nPROFESSIONAL SUMMARY\n${inputs.objective || "Dedicated candidate."}\n\nTECHNICAL SKILLS\n${inputs.topSkills || "Python, NumPy, Pandas, Scikit-Learn"}\n\nEDUCATION & CERTIFICATIONS\n${inputs.educationText || "B.Tech"}\nQuality Thought Academy - Verified Data Science Track (${numCompleted} Completed Milestones).`,
         optimizedKeywords: ["Python", "Pandas", "Data Science", "Machine Learning"],
         atsTips: ["Use standard font pairings", "Maintain clean plain text layout"]
       });
@@ -2036,7 +2250,7 @@ interface AtsResumeResponse {
   } catch (err: any) {
     console.error("[Gemini API] Build resume error, returning fallback:", err);
     res.json({
-      formattedResume: `${inputs.fullName || student?.name || "Arjun Sharma"}\n${inputs.email || "student@example.com"} | ${inputs.phone || "+91 9000"} | ${inputs.linkedin || "LinkedIn"}\n\nPROFESSIONAL SUMMARY\n${inputs.objective || "Dedicated candidate seeking placement in Data Analytics and Machine Learning engineering."}\n\nTECHNICAL SKILLS\n${inputs.topSkills || "Python, NumPy, Pandas, Scikit-Learn"}\n\nEDUCATION & CERTIFICATIONS\n${inputs.educationText || "B.Tech"}\nRaise Tech Academy - Verified Data Science Track (${numCompleted} Completed Milestones).`,
+      formattedResume: `${inputs.fullName || student?.name || "Arjun Sharma"}\n${inputs.email || "student@example.com"} | ${inputs.phone || "+91 9000"} | ${inputs.linkedin || "LinkedIn"}\n\nPROFESSIONAL SUMMARY\n${inputs.objective || "Dedicated candidate seeking placement in Data Analytics and Machine Learning engineering."}\n\nTECHNICAL SKILLS\n${inputs.topSkills || "Python, NumPy, Pandas, Scikit-Learn"}\n\nEDUCATION & CERTIFICATIONS\n${inputs.educationText || "B.Tech"}\nQuality Thought Academy - Verified Data Science Track (${numCompleted} Completed Milestones).`,
       optimizedKeywords: ["Python", "Pandas", "Data Science", "Machine Learning"],
       atsTips: ["Use standard font pairings", "Maintain clean plain text layout"]
     });
@@ -2077,7 +2291,7 @@ app.post("/api/careers/tailor-resume-for-job", async (req, res) => {
   if (mlDone >= 2) verifiedTracks.push(`Supervised Machine Learning (Completed ${mlDone}/30 module milestones)`);
 
   const academyStatsText = `
-  Institute: Raise Tech Academy
+  Institute: Quality Thought Academy
   Verified Milestones Completed: ${numCompleted} / 200 Days of daily testing curriculum.
   Academic Evaluation Grade: ${avgScore}% Average accuracy score.
   Earned credentials: ${verifiedTracks.join(", ") || "Data Science Foundations Training Track"}
@@ -2148,7 +2362,7 @@ interface TailoredResumeResponse {
     } catch (parseErr) {
       console.warn("[Gemini API] Failed to parse tailor-resume JSON. Fallback formatting applied.");
       res.json({
-        formattedResume: `${inputs.fullName || student?.name || "Arjun Sharma"}\n${inputs.email || "student@example.com"} | ${inputs.phone || "+91 9000"} | ${inputs.linkedin || "LinkedIn"}\n\nPROFESSIONAL SUMMARY\nCandidate targeting the ${job.title} role${job.company ? ` at ${job.company}` : ""}.\n\nTECHNICAL SKILLS\n${inputs.topSkills || "Python, NumPy, Pandas, Scikit-Learn"}\n\nEDUCATION & CERTIFICATIONS\n${inputs.educationText || "B.Tech"}\nRaise Tech Academy - Verified Data Science Track (${numCompleted} Completed Milestones).`,
+        formattedResume: `${inputs.fullName || student?.name || "Arjun Sharma"}\n${inputs.email || "student@example.com"} | ${inputs.phone || "+91 9000"} | ${inputs.linkedin || "LinkedIn"}\n\nPROFESSIONAL SUMMARY\nCandidate targeting the ${job.title} role${job.company ? ` at ${job.company}` : ""}.\n\nTECHNICAL SKILLS\n${inputs.topSkills || "Python, NumPy, Pandas, Scikit-Learn"}\n\nEDUCATION & CERTIFICATIONS\n${inputs.educationText || "B.Tech"}\nQuality Thought Academy - Verified Data Science Track (${numCompleted} Completed Milestones).`,
         optimizedKeywords: ["Python", "Pandas", "Data Science", job.title].filter(Boolean),
         tailoringNotes: [`Resume framed around the "${job.title}" opening.`],
         tailoredFor: `${job.title}${job.company ? ` @ ${job.company}` : ""}`
@@ -2157,7 +2371,7 @@ interface TailoredResumeResponse {
   } catch (err: any) {
     console.error("[Gemini API] Tailor resume error, returning fallback:", err);
     res.json({
-      formattedResume: `${inputs.fullName || student?.name || "Arjun Sharma"}\n${inputs.email || "student@example.com"} | ${inputs.phone || "+91 9000"} | ${inputs.linkedin || "LinkedIn"}\n\nPROFESSIONAL SUMMARY\nCandidate targeting the ${job.title} role${job.company ? ` at ${job.company}` : ""}.\n\nTECHNICAL SKILLS\n${inputs.topSkills || "Python, NumPy, Pandas, Scikit-Learn"}\n\nEDUCATION & CERTIFICATIONS\n${inputs.educationText || "B.Tech"}\nRaise Tech Academy - Verified Data Science Track (${numCompleted} Completed Milestones).`,
+      formattedResume: `${inputs.fullName || student?.name || "Arjun Sharma"}\n${inputs.email || "student@example.com"} | ${inputs.phone || "+91 9000"} | ${inputs.linkedin || "LinkedIn"}\n\nPROFESSIONAL SUMMARY\nCandidate targeting the ${job.title} role${job.company ? ` at ${job.company}` : ""}.\n\nTECHNICAL SKILLS\n${inputs.topSkills || "Python, NumPy, Pandas, Scikit-Learn"}\n\nEDUCATION & CERTIFICATIONS\n${inputs.educationText || "B.Tech"}\nQuality Thought Academy - Verified Data Science Track (${numCompleted} Completed Milestones).`,
       optimizedKeywords: ["Python", "Pandas", "Data Science", job.title].filter(Boolean),
       tailoringNotes: [`Resume framed around the "${job.title}" opening.`],
       tailoredFor: `${job.title}${job.company ? ` @ ${job.company}` : ""}`
@@ -2191,24 +2405,6 @@ app.post("/api/videos", (req, res) => {
     const videoId = processedUrl.split("youtu.be/")[1]?.split("?")[0];
     if (videoId) {
       processedUrl = `https://www.youtube.com/embed/${videoId}`;
-    }
-  } else if (processedUrl.includes("drive.google.com")) {
-    // Normalize any Google Drive share link format to the embeddable /preview form,
-    // so a teacher can just paste the "Share" link from Drive and have it play inline
-    // instead of only opening in a new tab. Handles:
-    //   https://drive.google.com/file/d/FILE_ID/view?usp=sharing
-    //   https://drive.google.com/open?id=FILE_ID
-    //   https://drive.google.com/uc?id=FILE_ID
-    let fileId: string | null = null;
-    const fileMatch = processedUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
-    if (fileMatch) {
-      fileId = fileMatch[1];
-    } else {
-      const idMatch = processedUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-      if (idMatch) fileId = idMatch[1];
-    }
-    if (fileId) {
-      processedUrl = `https://drive.google.com/file/d/${fileId}/preview`;
     }
   }
 
@@ -2269,60 +2465,19 @@ app.post("/api/student/login", (req, res) => {
 
   if (studentIndex !== -1) {
     const student = db.students[studentIndex];
-
-    // Enforce 24-hour lockout after 3 consecutive failed attempts
-    if (student.loginLockedUntil) {
-      const lockedUntilMs = new Date(student.loginLockedUntil).getTime();
-      if (lockedUntilMs > Date.now()) {
-        const minutesLeft = Math.ceil((lockedUntilMs - Date.now()) / 60000);
-        const hoursLeft = Math.floor(minutesLeft / 60);
-        const remMinutes = minutesLeft % 60;
-        const remainingText = hoursLeft > 0 ? `${hoursLeft}h ${remMinutes}m` : `${remMinutes}m`;
-        res.status(403).json({
-          success: false,
-          error: `Account locked due to 3 failed login attempts. Please try again in ${remainingText}, or contact your instructor to unlock it early.`
-        });
-        return;
-      }
-      // Lockout window has passed — clear it and reset the strike counter
-      student.loginLockedUntil = undefined;
-      student.failedLoginAttempts = 0;
-    }
-
     const sPhone = student.phoneNumber ? student.phoneNumber.trim().replace(/\D/g, "") : "";
     
     // If student record has a phone number, check if matches
     if (sPhone && sPhone !== qPhone) {
-      const attempts = (student.failedLoginAttempts || 0) + 1;
-      if (attempts >= 3) {
-        student.failedLoginAttempts = 0;
-        student.loginLockedUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-        writeDB(db);
-        res.status(403).json({
-          success: false,
-          error: "Authentication failed 3 times. Your account has been locked for 24 hours for security. Please contact your instructor if you need it unlocked sooner."
-        });
-        return;
-      }
-      student.failedLoginAttempts = attempts;
-      writeDB(db);
-      const remaining = 3 - attempts;
-      res.status(401).json({
-        success: false,
-        error: `Authentication failed. The Phone Number does not match the registered record. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining before your account is locked for 24 hours.`
-      });
+      res.status(401).json({ success: false, error: "Authentication failed. The Phone Number does not match the registered record." });
       return;
     }
-
-    // Successful match (or first-time phone save) — clear any strike count
-    student.failedLoginAttempts = 0;
-    student.loginLockedUntil = undefined;
 
     // Save phone number if empty
     if (!sPhone) {
       student.phoneNumber = qPhone;
+      writeDB(db);
     }
-    writeDB(db);
 
     res.json({
       success: true,
@@ -2514,41 +2669,6 @@ app.post("/api/feature-locks", (req, res) => {
   }
 
   db.locks[batchName].featureLocks[feature] = enabled;
-  writeDB(db);
-  res.json({ success: true, locks: db.locks });
-});
-
-// Update the course track (Data Science / Python / Java) for an existing batch —
-// drives which AI Interview subject list students in that batch see.
-app.post("/api/batches/:batchName/course-track", (req, res) => {
-  const { batchName } = req.params;
-  const { courseTrack } = req.body;
-  const validTracks = ["data-science", "python", "java"];
-  if (!batchName || !validTracks.includes(courseTrack)) {
-    res.status(400).json({ error: "Missing/invalid parameters: batchName param and a valid courseTrack (data-science, python, or java) are required." });
-    return;
-  }
-
-  const db = readDB();
-  db.locks = db.locks || {};
-  if (!db.locks[batchName]) {
-    db.locks[batchName] = {
-      batchName,
-      unlockedCourses: ["python"],
-      unlockedDays: [1, 2],
-      courseLockState: {
-        python: false,
-        numpy: true,
-        pandas: true,
-        ml: true,
-        dl: true,
-        nlp: true,
-        genai: true,
-        eda: true
-      }
-    };
-  }
-  db.locks[batchName].courseTrack = courseTrack;
   writeDB(db);
   res.json({ success: true, locks: db.locks });
 });
