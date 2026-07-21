@@ -58,6 +58,10 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
 
   // Active Management States
   const [selectedBatch, setSelectedBatch] = useState<string>("");
+  const [trackImportStatus, setTrackImportStatus] = useState<Record<string, { status: string; completed: number; total: number }>>({
+    python: { status: "idle", completed: 0, total: 200 },
+    java: { status: "idle", completed: 0, total: 200 },
+  });
   const [confirmDeleteBatch, setConfirmDeleteBatch] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<"attendance" | "students" | "locks" | "quizzes" | "interviews" | "videos" | "tests" | "featureAccess">("attendance");
   const [loading, setLoading] = useState(true);
@@ -1023,6 +1027,52 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
     }
   };
 
+  // One-click bulk import of all 200 days of daily-test content for the Python-only
+  // or Java-only track. Starts a background job on the server and returns immediately;
+  // handleFetchImportStatus below polls progress so the UI can show a live progress bar.
+  const handleImportTrack200Days = async (track: "python" | "java") => {
+    try {
+      const res = await fetch(`/api/curriculum/${track}/import-200`, { method: "POST" });
+      const data = await res.json();
+      if (data.status) {
+        setTrackImportStatus((prev) => ({ ...prev, [track]: data.status }));
+      }
+    } catch (e) {
+      alert(`Failed to start the ${track === "java" ? "Java" : "Python"} 200-day import.`);
+    }
+  };
+
+  const handleFetchImportStatus = async (track: "python" | "java") => {
+    try {
+      const res = await fetch(`/api/curriculum/${track}/import-status`);
+      const data = await res.json();
+      if (data.status) {
+        setTrackImportStatus((prev) => ({ ...prev, [track]: data.status }));
+      }
+    } catch (e) {
+      // silent — this is just a background progress poll
+    }
+  };
+
+  // Poll import progress every 3s while either track's import is running, so the
+  // teacher sees the progress bar move without needing to refresh the page.
+  useEffect(() => {
+    const anyRunning = trackImportStatus.python?.status === "running" || trackImportStatus.java?.status === "running";
+    if (!anyRunning) return;
+    const interval = setInterval(() => {
+      if (trackImportStatus.python?.status === "running") handleFetchImportStatus("python");
+      if (trackImportStatus.java?.status === "running") handleFetchImportStatus("java");
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [trackImportStatus.python?.status, trackImportStatus.java?.status]);
+
+  // Load the current import status for both tracks once when the dashboard mounts,
+  // so a page refresh mid-import still shows accurate progress instead of resetting to idle.
+  useEffect(() => {
+    handleFetchImportStatus("python");
+    handleFetchImportStatus("java");
+  }, []);
+
   // Delete batch permanently
   const handleDeleteBatch = async () => {
     if (!selectedBatch) return;
@@ -1464,6 +1514,32 @@ export default function TeacherDashboard({ onLogout }: TeacherDashboardProps) {
               </select>
             </div>
           )}
+
+          {selectedBatch && (locks[selectedBatch]?.courseTrack === "python" || locks[selectedBatch]?.courseTrack === "java") && (() => {
+            const track = locks[selectedBatch].courseTrack as "python" | "java";
+            const status = trackImportStatus[track] || { status: "idle", completed: 0, total: 200 };
+            const pct = Math.round((status.completed / (status.total || 200)) * 100);
+            return (
+              <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 px-3 py-1 rounded-md">
+                {status.status === "running" ? (
+                  <div className="flex items-center gap-2">
+                    <div className="w-24 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                      <div className="h-full bg-amber-500 transition-all" style={{ width: `${pct}%` }} />
+                    </div>
+                    <span className="text-[10px] font-mono text-amber-400">{status.completed}/200</span>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => handleImportTrack200Days(track)}
+                    className="text-[10px] font-bold uppercase tracking-wide text-amber-400 hover:text-amber-300 cursor-pointer"
+                    title={`Generate and store all 200 days of ${track === "java" ? "Java" : "Python"} daily-test content in one click`}
+                  >
+                    {status.status === "done" ? `↻ Re-import ${track === "java" ? "Java" : "Python"} (${status.completed}/200)` : `⬇ Import 200 Days (${track === "java" ? "Java" : "Python"})`}
+                  </button>
+                )}
+              </div>
+            );
+          })()}
 
           <button
             onClick={() => setShowAddBatch(true)}
