@@ -1340,3 +1340,165 @@ Ensure your output is strictly valid JSON, containing no conversational explanat
   }
 }
 
+// ---------------------------------------------------------------------------
+// Single-language daily test tracks: Python-only and Java-only.
+// Unlike the staged Data Science curriculum (Python -> NumPy -> Pandas -> ML...),
+// these two tracks run ONE continuous 200-day curriculum in that language, cycling
+// through core topics with increasing depth across repeated "rounds" so 200 days
+// of distinct, progressively deeper content can be produced/imported in one click.
+// ---------------------------------------------------------------------------
+
+const PYTHON_TRACK_TOPICS: string[] = [
+  "Variables & Data Types",
+  "Operators & Expressions",
+  "Conditional Statements",
+  "Loops (for/while)",
+  "Lists & Tuples",
+  "Dictionaries & Sets",
+  "String Manipulation",
+  "Functions & Scope",
+  "Lambda, Map, Filter & Reduce",
+  "Exception Handling",
+  "File Handling",
+  "Modules & Packages",
+  "OOP: Classes & Objects",
+  "OOP: Inheritance & Polymorphism",
+  "Iterators & Generators",
+  "Decorators",
+  "Regular Expressions",
+  "Multithreading & Multiprocessing",
+  "Data Structures & Algorithms",
+  "Working with APIs & JSON",
+];
+
+const JAVA_TRACK_TOPICS: string[] = [
+  "Variables, Data Types & Operators",
+  "Control Flow (if/switch/loops)",
+  "Arrays & Strings",
+  "Methods & Overloading",
+  "OOP: Classes & Objects",
+  "OOP: Inheritance & Polymorphism",
+  "Abstract Classes & Interfaces",
+  "Exception Handling",
+  "Collections Framework (List/Set/Map)",
+  "Generics",
+  "Multithreading & Concurrency",
+  "File I/O & Serialization",
+  "Lambda Expressions & Streams",
+  "JDBC & Database Basics",
+  "Design Patterns",
+  "Data Structures & Algorithms",
+  "Spring Boot Basics",
+  "REST APIs in Java",
+  "Unit Testing (JUnit)",
+  "Memory Management & JVM Internals",
+];
+
+function getTrackTopics(track: "python" | "java"): string[] {
+  return track === "java" ? JAVA_TRACK_TOPICS : PYTHON_TRACK_TOPICS;
+}
+
+export function getTopicTitleForTrackDay(track: "python" | "java", dayNumber: number): string {
+  const topics = getTrackTopics(track);
+  const idx = (dayNumber - 1) % topics.length;
+  const round = Math.floor((dayNumber - 1) / topics.length) + 1;
+  const base = topics[idx];
+  return round === 1 ? base : `${base} (Round ${round} — Advanced Practice)`;
+}
+
+function getFallbackQuizForTrackDay(track: "python" | "java", dayNumber: number, topicTitle: string): DayQuiz {
+  const languageLabel = track === "java" ? "Java" : "Python";
+  const mcqs: MCQQuestion[] = Array.from({ length: 8 }).map((_, i) => ({
+    questionText: `[${languageLabel} — Day ${dayNumber}] Which statement best reflects a correct usage/understanding of "${topicTitle}"? (Question ${i + 1})`,
+    options: ["Option A", "Option B", "Option C", "Option D"],
+    correctOption: 0,
+    explanation: `This is placeholder content for "${topicTitle}". Configure GEMINI_API_KEY so real AI-generated questions can be produced for this track, or use the Override Quiz tool to replace it manually.`,
+  }));
+  const coding: CodingQuestion[] = [
+    {
+      questionText: `Write a short ${languageLabel} program that demonstrates "${topicTitle}".`,
+      starterCode: track === "java" ? `public class Solution {\n    public static void main(String[] args) {\n        // Write your Java code here\n    }\n}` : `def solution():\n    # Write your Python code here\n    pass`,
+      expectedKeywords: [languageLabel.toLowerCase()],
+      solutionDescription: `Placeholder solution outline for "${topicTitle}". Replace via the Override Quiz tool once real content is ready.`,
+    },
+    {
+      questionText: `Write a ${languageLabel} function/method that applies "${topicTitle}" to solve a small practical problem.`,
+      starterCode: track === "java" ? `public class Solution {\n    public static void main(String[] args) {\n        // Write your Java code here\n    }\n}` : `def solution():\n    # Write your Python code here\n    pass`,
+      expectedKeywords: [languageLabel.toLowerCase()],
+      solutionDescription: `Placeholder solution outline for "${topicTitle}". Replace via the Override Quiz tool once real content is ready.`,
+    },
+  ];
+  return { dayNumber, courseSlug: track, topicTitle, mcqs, coding };
+}
+
+// Generates (or falls back to a labeled placeholder for) a single day's quiz for the
+// Python-only or Java-only daily test track. Used both for on-demand fetches and for
+// the "Import 200 Days" bulk generator in server.ts.
+export async function generateQuizForTrackDay(track: "python" | "java", dayNumber: number): Promise<DayQuiz> {
+  const topicTitle = getTopicTitleForTrackDay(track, dayNumber);
+  const languageLabel = track === "java" ? "Java" : "Python";
+  const ai = getAi();
+
+  if (!ai) {
+    return getFallbackQuizForTrackDay(track, dayNumber, topicTitle);
+  }
+
+  try {
+    const prompt = `
+Generate a high-quality ${languageLabel} Daily Test quiz in JSON format for Day ${dayNumber} of a dedicated ${languageLabel}-only 200-day training track.
+Topic Focus: "${topicTitle}".
+
+Important Structure instructions:
+Return a JSON object containing EXACTLY:
+{
+  "dayNumber": ${dayNumber},
+  "courseSlug": "${track}",
+  "topicTitle": "${topicTitle}",
+  "mcqs": [
+    {
+      "questionText": "A precise, technical ${languageLabel} question covering ${topicTitle}",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correctOption": 0, // 0-indexed integer of the correct answer
+      "explanation": "Brief context explanation of why this answer is correct"
+    } // ... provide EXACTLY 8 MCQs
+  ],
+  "coding": [
+    {
+      "questionText": "Detailed description of a ${languageLabel} coding challenge targeting ${topicTitle}",
+      "starterCode": "${track === "java" ? "public class Solution {\\n    public static void main(String[] args) {\\n        // Write your Java code here\\n    }\\n}" : "def solution_fn(...):\\n    # Write Python code here"}",
+      "expectedKeywords": ["keyword1", "keyword2"],
+      "solutionDescription": "Brief explanation of how to construct the correct solution"
+    } // ... provide EXACTLY 2 Coding challenges
+  ]
+}
+
+Ensure your output is strictly valid JSON, containing no explanation text, and wrapped inside markdown code blocks.
+`;
+
+    const resp = await generateContentWithRetry(ai, {
+      model: "gemini-3.5-flash",
+      contents: prompt,
+    });
+
+    const respText = resp.text || "";
+    let jsonString = respText.trim();
+    if (jsonString.startsWith("```json")) {
+      jsonString = jsonString.slice(7);
+    } else if (jsonString.startsWith("```")) {
+      jsonString = jsonString.slice(3);
+    }
+    if (jsonString.endsWith("```")) {
+      jsonString = jsonString.slice(0, -3);
+    }
+    jsonString = jsonString.trim();
+
+    const parsed = JSON.parse(jsonString) as DayQuiz;
+    if (parsed && Array.isArray(parsed.mcqs) && parsed.mcqs.length === 8 && Array.isArray(parsed.coding) && parsed.coding.length === 2) {
+      return parsed;
+    }
+    throw new Error("Parsed JSON has invalid structure or length of lists");
+  } catch (err) {
+    console.warn(`[Gemini API] Track quiz generation failed for ${track} Day ${dayNumber}, using placeholder:`, err);
+    return getFallbackQuizForTrackDay(track, dayNumber, topicTitle);
+  }
+}
