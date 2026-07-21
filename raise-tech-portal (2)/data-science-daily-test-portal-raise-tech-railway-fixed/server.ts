@@ -2059,21 +2059,33 @@ app.post("/api/careers/live-jobs", async (req, res) => {
 
   // If the student hasn't filled in any portal profiles yet, fall back to a broad default
   // set so the search still works — filled-in portals are simply prioritized, never required.
-  const portalsToSearch = filledPortals.length > 0
-    ? filledPortals
-    : ["LinkedIn", "Naukri.com", "Indeed", "Instahyre", "Wellfound (AngelList)"];
+  const ALL_DEFAULT_PORTALS = ["LinkedIn", "Naukri.com", "Indeed", "Glassdoor", "Foundit", "Shine.com", "TimesJobs", "Internshala", "Wellfound (AngelList)", "Instahyre"];
+  const MIN_PORTALS_TO_SEARCH = 8;
+  // Always search at least MIN_PORTALS_TO_SEARCH portals: whatever the student has filled in
+  // (even if it's just 1 or 2) is searched first/prioritized, then topped up with defaults so
+  // the search is never narrowed down to only what they've listed.
+  const portalsToSearch = [
+    ...filledPortals,
+    ...ALL_DEFAULT_PORTALS.filter((p) => !filledPortals.includes(p)),
+  ].slice(0, Math.max(MIN_PORTALS_TO_SEARCH, filledPortals.length));
 
+  const nowStr = new Date().toISOString();
   const prompt = `You are a live job-search research assistant for "Quality Thought Academy" students.
 
-Use Google Search to find 6-8 REAL, currently open job postings that closely match this candidate profile:
+Today's date/time (UTC) is ${nowStr}.
+
+Use Google Search to find 8-10 REAL job postings that were posted or re-posted within the LAST 48 HOURS ONLY, and that closely match this candidate profile:
 - Target role / keywords: "${focusQuery}"
 - Skills: ${skillsList || "Python, Data Science fundamentals"}
 - Location preference: "${targetLocation}" (include a couple of remote/India-wide roles too if relevant)
 ${resumeText ? `- Additional resume context: """${String(resumeText).slice(0, 1500)}"""` : ""}
 
-Search across these portals the student has active profiles on${filledPortals.length > 0 ? "" : " (default set, since the student hasn't listed specific profiles yet)"}: ${portalsToSearch.join(", ")}, plus official company career pages. It is completely fine if the student only listed one or two portals — search thoroughly across exactly the ones given rather than expecting a full list.
+Search across at least ${Math.min(portalsToSearch.length, 8)} of these portals${filledPortals.length > 0 ? " (the student's own filled-in profiles are listed first and should be prioritized, topped up with other major portals so the search is never narrowed to just 1-2 sites)" : " (default broad set, since the student hasn't listed specific profiles yet)"}: ${portalsToSearch.join(", ")}, plus official company career pages.
 
-For every result you include, you MUST have actually found it via search — do not invent postings or URLs. Prefer the most direct link available: the company's own careers-page listing if you can find it, otherwise the specific job-board listing page for that exact posting (never a generic search-results page).
+Freshness rule: only include postings dated, or clearly indicated as posted, within the last 48 hours (e.g. "posted today", "1 day ago", "24 hours ago", "2 days ago"). If a posting's date cannot be confirmed as within the last 48 hours, leave it out.
+Coverage rule: try to include at least one result from as many of the listed portals as you can find fresh postings on — do not concentrate all results on a single portal if others also have fresh matches.
+
+For every result you include, you MUST have actually found it via search — do not invent postings, dates, or URLs. Prefer the most direct link available: the company's own careers-page listing if you can find it, otherwise the specific job-board listing page for that exact posting (never a generic search-results page).
 
 Respond with ONLY a JSON array (no markdown fences, no commentary) where each item strictly matches:
 {
@@ -2081,14 +2093,15 @@ Respond with ONLY a JSON array (no markdown fences, no commentary) where each it
   "title": string,          // Job title as posted
   "location": string,       // City/Remote as posted
   "source": string,         // e.g. "LinkedIn", "Naukri", "Indeed", "Company Careers Page", "Instahyre", "Wellfound"
+  "postedWithin": string,   // How recently it was posted, as stated on the source, e.g. "1 day ago", "Today"
   "applyUrl": string         // The exact, direct URL to that specific posting/apply page found via search
 }
 
-If you cannot find enough verifiably real postings, return fewer items rather than inventing any.`;
+If you cannot find 8-10 postings from the last 48 hours, return however many you can verifiably confirm (even just 1-2) rather than inventing any, and widen the search to nearby dates only as a last resort while noting that in "postedWithin".`;
 
   try {
     const response = await generateContentWithRetry(ai, {
-      model: "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }]
