@@ -222,6 +222,35 @@ export function getCourseForDay(day: number): CourseSyllabus {
   return found || SYLLABUS[0];
 }
 
+// Single-course descriptors for the Python-only and Java-only daily test tracks
+// (unlike Data Science, these tracks are not split into stages — they run one
+// continuous 200-day curriculum in that language).
+export const PYTHON_FULL_TRACK: CourseSyllabus = {
+  slug: "python-track",
+  name: "Python Programming (Full Track)",
+  startDay: 1,
+  endDay: 200,
+  icon: "Code2",
+  description: "A complete 200-day daily test track covering core Python, OOP, file handling, DSA, and advanced topics.",
+};
+
+export const JAVA_FULL_TRACK: CourseSyllabus = {
+  slug: "java-track",
+  name: "Java Programming (Full Track)",
+  startDay: 1,
+  endDay: 200,
+  icon: "Coffee",
+  description: "A complete 200-day daily test track covering core Java, OOP, collections, multithreading, and advanced topics.",
+};
+
+// Returns the right course descriptor for the Daily Test UI based on the batch's course track.
+// Defaults to the staged Data Science SYLLABUS for "data-science" or untagged/legacy batches.
+export function getCourseForDayByTrack(day: number, track?: string | null): CourseSyllabus {
+  if (track === "python") return PYTHON_FULL_TRACK;
+  if (track === "java") return JAVA_FULL_TRACK;
+  return getCourseForDay(day);
+}
+
 export function getTopicTitleForDay(day: number): string {
   const course = getCourseForDay(day);
   const relativeDay = day - course.startDay + 1;
