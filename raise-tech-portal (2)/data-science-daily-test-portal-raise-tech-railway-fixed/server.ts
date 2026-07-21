@@ -1121,13 +1121,52 @@ app.post("/api/lock-status", (req, res) => {
   }
 
   const db = readDB();
+  const existing = db.locks[batchName];
   db.locks[batchName] = {
     batchName,
     unlockedCourses: unlockedCourses || [],
     unlockedDays: unlockedDays || [],
-    courseLockState: courseLockState || {}
+    courseLockState: courseLockState || {},
+    // Preserve fields owned by other endpoints (course track, per-feature locks) so
+    // saving day/course unlocks here doesn't silently reset them.
+    courseTrack: existing?.courseTrack,
+    featureLocks: existing?.featureLocks,
   };
 
+  writeDB(db);
+  res.json({ success: true, locks: db.locks });
+});
+
+// Sets which curriculum/AI-interview track a batch follows: "data-science" (default),
+// "python", or "java". Drives both the AI Interview subject pool and which daily-test
+// quiz content set students in that batch are served.
+app.post("/api/batches/:batchName/course-track", (req, res) => {
+  const { batchName } = req.params;
+  const { courseTrack } = req.body;
+  if (!batchName) {
+    res.status(400).json({ error: "Batch name is required" });
+    return;
+  }
+  if (!["data-science", "python", "java"].includes(courseTrack)) {
+    res.status(400).json({ error: "courseTrack must be one of: data-science, python, java" });
+    return;
+  }
+
+  const db = readDB();
+  if (!db.batches.includes(batchName)) {
+    res.status(404).json({ error: `Batch "${batchName}" does not exist.` });
+    return;
+  }
+
+  if (!db.locks[batchName]) {
+    db.locks[batchName] = {
+      batchName,
+      unlockedCourses: ["python"],
+      unlockedDays: [1, 2, 3],
+      courseLockState: { python: false, numpy: true, pandas: true, ml: true },
+    };
+  }
+  db.locks[batchName].courseTrack = courseTrack;
   writeDB(db);
   res.json({ success: true, locks: db.locks });
 });
