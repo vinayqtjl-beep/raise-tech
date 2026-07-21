@@ -32,7 +32,7 @@ import {
   X,
   Terminal
 } from "lucide-react";
-import { Student, DayQuiz, SYLLABUS, getCourseForDay, getTopicTitleForDay, Submission, AIInterview } from "../types.js";
+import { Student, DayQuiz, SYLLABUS, getCourseForDay, getCourseForDayByTrack, getTopicTitleForDay, Submission, AIInterview } from "../types.js";
 import AiInterviewRoom from "./AiInterviewRoom.js";
 import { ASSESSMENT_PRESETS, SubjectAssessment } from "../assessmentsData.js";
 import StudentAssessmentsView from "./StudentAssessmentsView.js";
@@ -53,6 +53,11 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
   const [activeTab, setActiveTab] = useState<"curriculum" | "assessments" | "interview" | "careers" | "resume">("curriculum");
   const [studentInterviews, setStudentInterviews] = useState<AIInterview[]>([]);
   const [jobLocation, setJobLocation] = useState<string>("Hyderabad, India");
+
+  // Which daily-test curriculum track this student's batch follows: "data-science"
+  // (default/legacy), "python", or "java". Drives which quiz content set is fetched.
+  const studentCourseTrack: "data-science" | "python" | "java" =
+    (locks[student.batch]?.courseTrack as any) || "data-science";
 
   // Resume Analyzer States
   const [resumeText, setResumeText] = useState<string>("");
@@ -739,7 +744,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
     setShowReviewExplanations(false);
 
     try {
-      const res = await fetch(`/api/quiz/${dayNum}`);
+      const res = await fetch(`/api/quiz/${dayNum}?track=${studentCourseTrack}`);
       if (res.ok) {
         const quiz = await res.json();
         setQuizData(quiz);
@@ -1352,7 +1357,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                 {unlockedDays.length > 0 ? (
                   <>
                     <div className="text-md font-bold text-slate-900 leading-tight">
-                      {getCourseForDay(Math.max(...unlockedDays)).name}
+                      {getCourseForDayByTrack(Math.max(...unlockedDays), studentCourseTrack).name}
                     </div>
                     <span className="text-[9px] font-mono text-indigo-600 font-medium">
                       Curriculum Max unlocked: Day #{Math.max(...unlockedDays)}
@@ -1378,7 +1383,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                 <h3 className="text-xl font-bold text-slate-900">
                   Topic: {quizData.topicTitle}
                 </h3>
-                <p className="text-xs text-slate-400">Subject Field: {getCourseForDay(activeDay).name}</p>
+                <p className="text-xs text-slate-400">Subject Field: {getCourseForDayByTrack(activeDay, studentCourseTrack).name}</p>
               </div>
 
               {!isTestSubmitted && (
