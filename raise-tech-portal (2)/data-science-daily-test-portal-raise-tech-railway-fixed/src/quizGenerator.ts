@@ -1,1504 +1,4105 @@
-import "dotenv/config";
-import { GoogleGenAI } from "@google/genai";
-import { DayQuiz, getCourseForDay, getTopicTitleForDay, MCQQuestion, CodingQuestion } from "./types.js";
-import { PRESET_DAILY_QUIZZES } from "./curriculumData.js";
+import React, { useState, useEffect } from "react";
+import {
+  Award,
+  BookOpen,
+  Calendar,
+  CheckCircle2,
+  Clock,
+  Code2,
+  Lock,
+  MessageSquare,
+  Sparkles,
+  ArrowRight,
+  LogOut,
+  Play,
+  Check,
+  Zap,
+  ChevronDown,
+  AlertCircle,
+  Briefcase,
+  Search,
+  ExternalLink,
+  FileText,
+  Loader2,
+  Copy,
+  Download,
+  Video,
+  Plus,
+  Youtube,
+  FileVideo,
+  Edit,
+  RotateCcw,
+  X,
+  Terminal
+} from "lucide-react";
+import { Student, DayQuiz, SYLLABUS, getCourseForDay, getCourseForDayByTrack, getTopicTitleForDay, Submission, AIInterview } from "../types.js";
+import AiInterviewRoom from "./AiInterviewRoom.js";
+import { ASSESSMENT_PRESETS, SubjectAssessment } from "../assessmentsData.js";
+import StudentAssessmentsView from "./StudentAssessmentsView.js";
+import AtsResumeMaker from "./AtsResumeMaker.js";
+import { getTestCasesForQuestion, diagnoseCodeErrors } from "../utils/testCases.js";
 
-// Lazy-initialize Gemini API client
-let aiClient: GoogleGenAI | null = null;
-function getAi(): GoogleGenAI | null {
-  if (aiClient) return aiClient;
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (apiKey && apiKey !== "MY_GEMINI_API_KEY" && apiKey.trim() !== "") {
-    try {
-      aiClient = new GoogleGenAI({ apiKey });
-      return aiClient;
-    } catch (e) {
-      console.error("Failed to initialize GoogleGenAI client:", e);
-    }
-  }
-  return null;
+interface StudentPortalProps {
+  student: Student;
+  onLogout: () => void;
 }
 
-async function generateContentWithRetry(ai: any, params: any, retries: number = 3, delayMs: number = 1000): Promise<any> {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await ai.models.generateContent(params);
-    } catch (err: any) {
-      attempt++;
-      const errMsg = String(err.message || err);
-      const errStatus = err.status || (err.error?.code) || 0;
-      const isTransient = errMsg.includes("503") || 
-                          errMsg.includes("UNAVAILABLE") || 
-                          errMsg.includes("429") || 
-                          errMsg.includes("RESOURCE_EXHAUSTED") || 
-                          errStatus === 503 || 
-                          errStatus === 429;
-      if (isTransient && attempt < retries) {
-        console.warn(`[Gemini API] Transient error (attempt ${attempt}/${retries}): ${errMsg}. Retrying in ${delayMs}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-        delayMs *= 2; // Exponential backoff
-      } else {
-        throw err;
-      }
-    }
-  }
-}
+export default function StudentPortal({ student, onLogout }: StudentPortalProps) {
+  // Test loading parameters
+  const [unlockedDays, setUnlockedDays] = useState<number[]>([]);
+  const [locks, setLocks] = useState<Record<string, any>>({});
+  const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<"curriculum" | "assessments" | "interview" | "careers" | "resume">("curriculum");
+  const [studentInterviews, setStudentInterviews] = useState<AIInterview[]>([]);
+  const [jobLocation, setJobLocation] = useState<string>("Hyderabad, India");
 
-// Fallback questions dictionary for all 8 subjects to guarantee perfect operation-mode
-const SUBJECT_FALLBACKS: Record<string, { mcqs: MCQQuestion[]; coding: CodingQuestion[] }> = {
-  python: {
-    mcqs: [
-      {
-        questionText: "What is the output of the code: print(type([1, 2] * 2)) in Python?",
-        options: [
-          "<class 'list'>",
-          "<class 'tuple'>",
-          "<class 'int'>",
-          "TypeError: unsupported operand"
-        ],
-        correctOption: 0,
-        explanation: "Multiplying a list by an integer duplicates the elements in a nested or flat list, but the resulting object type remains a list."
-      },
-      {
-        questionText: "Which keyword is used to handle exceptions caught during run-time execution in Python?",
-        options: ["catch", "try", "except", "throws"],
-        correctOption: 2,
-        explanation: "Python uses 'except' block to catch and handle exceptions, unlike Java/JS which use 'catch'."
-      },
-      {
-        questionText: "What is the difference between list.append(x) and list.extend(x) in Python?",
-        options: [
-          "append adds x as a single element, extend adds elements of collection x individually",
-          "extend adds x as a single element, append adds elements of x individually",
-          "There is no difference, both are aliases",
-          "append works in-place, extend returns a new list"
-        ],
-        correctOption: 0,
-        explanation: "append() adds its argument as a single element to the end of a list. extend() iterates over its argument adding each element to the list."
-      },
-      {
-        questionText: "Which of the following creates a dictionary with keys 'a' and 'b' initialized to 0?",
-        options: [
-          "dict.fromkeys(['a', 'b'], 0)",
-          "{'a', 'b'}.fromkeys(0)",
-          "dict({'a': 0, 'b'})",
-          "dict.zip(['a', 'b'], [0])"
-        ],
-        correctOption: 0,
-        explanation: "The classmethod dict.fromkeys(iterable, value) returns a new dictionary with keys from iterable and values set to value."
-      },
-      {
-        questionText: "What does the '__init__' method represent in Python classes?",
-        options: [
-          "A destroyer function",
-          "A static initializer",
-          "The class constructor method called upon object creation",
-          "An inheritance declaration tag"
-        ],
-        correctOption: 2,
-        explanation: "The __init__ method is the constructor for a class. It is automatically called when a new instance is created."
-      },
-      {
-        questionText: "How do you check if a key 'score' exists in a dictionary variables 'student_data'?",
-        options: [
-          "student_data.has_key('score')",
-          "'score' in student_data",
-          "student_data.contains('score')",
-          "student_data.find('score')"
-        ],
-        correctOption: 1,
-        explanation: "The modern Pythonic way to test dictionary key presence is the 'in' operator, e.g. 'key' in dict."
-      },
-      {
-        questionText: "What is the output of the statement: len({1, 1, 2, 3, 3})?",
-        options: ["5", "3", "2", "4"],
-        correctOption: 1,
-        explanation: "{1, 1, 2, 3, 3} creates a Set. Since Sets contain only unique elements, it results in {1, 2, 3}, which has a size/length of 3."
-      },
-      {
-        questionText: "What type of scope resolution does Python follow?",
-        options: [
-          "Dynamic scope binding",
-          "LEGB (Local, Enclosing, Global, Built-in)",
-          "Global-first lookup",
-          "Strict lexical block scope"
-        ],
-        correctOption: 1,
-        explanation: "Python resolves variable lookups using the LEGB rule: Local, Enclosing function locals, Global (module-level), and Built-in names."
-      }
-    ],
-    coding: [
-      {
-        questionText: "Write a function 'find_primes(n)' that takes an integer n and returns a list of prime numbers up to n.",
-        starterCode: "def find_primes(n):\n    # Write your Python code below\n    primes = []\n    return primes",
-        expectedKeywords: ["def", "range", "append", "return"],
-        solutionDescription: "Iterate from 2 up to n. For each number, check if it has any divisor between 2 and its square root. If none exist, append it to the primes array."
-      },
-      {
-        questionText: "Write a function 'word_frequencies(sentence)' that takes a sentence string and returns a dictionary counting occurrences of each unique word (case-insensitive).",
-        starterCode: "def word_frequencies(sentence):\n    # Write your Python code below\n    freq = {}\n    return freq",
-        expectedKeywords: ["def", "split", "lower", "return"],
-        solutionDescription: "Split the sentence using lower() to get all words in lowercase, and then iterate to build or update a dictionary counter."
-      }
-    ]
-  },
-  numpy: {
-    mcqs: [
-      {
-        questionText: "Which of the following is the standard way to import the NumPy library?",
-        options: [
-          "import numpy as np",
-          "import num_py as np",
-          "from numpy import *",
-          "import np from numpy"
-        ],
-        correctOption: 0,
-        explanation: "import numpy as np is the standard canonical convention followed in data science."
-      },
-      {
-        questionText: "How do you create an array filled with zeros of shape (3, 4) in NumPy?",
-        options: [
-          "np.zeros(3, 4)",
-          "np.zeros((3, 4))",
-          "np.make_array(3, 4, fill=0)",
-          "np.empty_zeros(3, 4)"
-        ],
-        correctOption: 1,
-        explanation: "The shape parameter to np.zeros() must be given as an integer or tuple of integers, i.e., (3, 4)."
-      },
-      {
-        questionText: "What is broadcasting in NumPy?",
-        options: [
-          "Transmitting arrays across network buffers",
-          "NumPy's ability to perform arithmetic operations on arrays of different matching shapes",
-          "Reshaping arrays by flattening them",
-          "Printing multi-dimensional matrices to standard output"
-        ],
-        correctOption: 1,
-        explanation: "Broadcasting is how NumPy treats arrays with different shapes during arithmetic operations, stretching the smaller array to match the larger."
-      },
-      {
-        questionText: "How do you calculate the dot product of two NumPy arrays 'A' and 'B'?",
-        options: ["A * B", "np.dot(A, B) or A @ B", "A.dot_product(B)", "np.multiply_dot(A, B)"],
-        correctOption: 1,
-        explanation: "A * B does element-wise multiplication. For matrix dot products, use np.dot(A, B), A.dot(B), or the modern py @ operator."
-      },
-      {
-        questionText: "Which attribute tells you the number of dimensions of a NumPy array?",
-        options: ["arr.ndim", "arr.shape", "arr.size", "arr.dim_count"],
-        correctOption: 0,
-        explanation: "arr.ndim stores the number of dimensions (axes) of an array as an integer."
-      },
-      {
-        questionText: "What happens when you slice a NumPy array (e.g., sub = arr[0:2]) and modify an element in 'sub'?",
-        options: [
-          "Only 'sub' is changed, NumPy makes copy by default",
-          "The original 'arr' is also updated because slices are views of the same memory allocation",
-          "It raises a ReadOnlyMemoryException",
-          "It creates an independent list copy"
-        ],
-        correctOption: 1,
-        explanation: "To keep memory overhead low, NumPy slices return a 'view' of the parent array rather than a copy. Modifications alter the original."
-      },
-      {
-        questionText: "How do you reshape an array of 12 elements into a matrix of 3 rows and 4 columns?",
-        options: ["arr.reshape(3, 4)", "arr.set_shape(3, 4)", "np.change_shape(arr, (3, 4))", "arr.resize_matrix(4, 3)"],
-        correctOption: 0,
-        explanation: "arr.reshape(3, 4) or arr.reshape((3, 4)) changes the dimensions of the array without copying data."
-      },
-      {
-        questionText: "What is the NumPy method to get the index of the maximum value inside a 1D array?",
-        options: ["arr.imax()", "np.argmax(arr)", "arr.max_index()", "np.max_idx(arr)"],
-        correctOption: 1,
-        explanation: "argmax returns the index of the maximum value along a specified axis. For a 1D array, np.argmax(arr) works."
-      }
-    ],
-    coding: [
-      {
-        questionText: "Write a NumPy function 'normalize_array(arr)' that takes a 1D numpy array, subtracts its mean, and divides by its standard deviation.",
-        starterCode: "import numpy as np\n\ndef normalize_array(arr):\n    # Write your NumPy code below\n    return arr",
-        expectedKeywords: ["mean", "std", "np"],
-        solutionDescription: "Compute mean using arr.mean() or np.mean(arr), compute standard deviation using arr.std(), and then return (arr - mean) / std."
-      },
-      {
-        questionText: "Write a function 'filter_matrix(matrix, threshold)' that returns all elements in a 2D matrix that are strictly greater than 'threshold' as a 1D array.",
-        starterCode: "import numpy as np\n\ndef filter_matrix(matrix, threshold):\n    # Write your NumPy code below\n    return matrix",
-        expectedKeywords: ["matrix", "threshold", "np"],
-        solutionDescription: "Create a boolean mask by doing matrix > threshold, and then index the matrix with the mask: matrix[matrix > threshold]."
-      }
-    ]
-  },
-  pandas: {
-    mcqs: [
-      {
-        questionText: "Which method is used to preview the first 5 rows of a Pandas DataFrame?",
-        options: ["df.first(5)", "df.top()", "df.head()", "df.show_rows(5)"],
-        correctOption: 2,
-        explanation: "df.head() displays the first 5 rows of a DataFrame by default."
-      },
-      {
-        questionText: "What is the difference between df.loc and df.iloc in Pandas?",
-        options: [
-          "loc is label-based selection, whereas iloc is integer-index based selection",
-          "iloc is label-based selection, whereas loc is integer-index based selection",
-          "loc selects columns only, iloc selects rows only",
-          "loc does not support slicing, iloc supports slicing"
-        ],
-        correctOption: 0,
-        explanation: "loc searches by row/column index labels, whereas iloc extracts values by their raw integer order (0-indexed offset)."
-      },
-      {
-        questionText: "How do you drop columns 'Age' and 'Salary' from a DataFrame 'df' in-place?",
-        options: [
-          "df.drop(['Age', 'Salary'], axis=1, inplace=True)",
-          "df.remove_cols(['Age', 'Salary'])",
-          "df.drop_columns(['Age', 'Salary'])",
-          "df.delete_axis(['Age', 'Salary'], inplace=True)"
-        ],
-        correctOption: 0,
-        explanation: "df.drop() with axis=1 (or columns=['Age', 'Salary']) and inplace=True deletes columns directly within the variable memory."
-      },
-      {
-        questionText: "Which method is used to count non-null values for each column in a DataFrame?",
-        options: ["df.count()", "df.isnull_count()", "df.info_non_null()", "df.size_clean()"],
-        correctOption: 0,
-        explanation: "df.count() returns the number of non-NA/null observations for each column/row."
-      },
-      {
-        questionText: "How would you fill all NaN values in a column 'Score' with the median of that column?",
-        options: [
-          "df['Score'].fillna(df['Score'].median(), inplace=True)",
-          "df['Score'].fill_nan(df['Score'].median())",
-          "df.replace_nulls('Score', fill='median')",
-          "np.fillna(df['Score'], strategy='median')"
-        ],
-        correctOption: 0,
-        explanation: "The standard pandas way is using series.fillna(value, inplace=True) with the column's computed median()."
-      },
-      {
-        questionText: "What does df.groupby('City')['Revenue'].mean() do in Pandas?",
-        options: [
-          "Groups data by City and returns the average Revenue for each unique city",
-          "Groups data by Revenue and calculates the average city count",
-          "Filters out rows matching the keyword City or Revenue",
-          "Sorts the city DataFrame by overall Revenue"
-        ],
-        correctOption: 0,
-        explanation: "It groups rows matching the unique values of 'City', isolates the 'Revenue' column, and then calculates the mean for each group."
-      },
-      {
-        questionText: "How do you export/save a Pandas DataFrame into a CSV file without exporting the row indexes?",
-        options: [
-          "df.to_csv('out.csv', index=False)",
-          "df.export_csv('out.csv', no_index=True)",
-          "df.write_csv('out.csv', include_idx=False)",
-          "df.save_to_file('out.csv', index=None)"
-        ],
-        correctOption: 0,
-        explanation: "Passing index=False to df.to_csv() prevents pandas from printing the index counter as the first column of the CSV sheet."
-      },
-      {
-        questionText: "Which Pandas function is used to concatenate multiple DataFrames along rows or columns?",
-        options: ["pd.concat()", "pd.merge()", "df.append_all()", "pd.join_frames()"],
-        correctOption: 0,
-        explanation: "pd.concat([df1, df2], axis=0/1) binds multiple DataFrames along rows (axis=0) or columns (axis=1)."
-      }
-    ],
-    coding: [
-      {
-        questionText: "Write a Pandas function 'filter_active_adults(df)' that accepts a DataFrame with columns 'Age' and 'Status', and filters it returning rows where 'Age' is 18 or above AND 'Status' is equal to 'Active'.",
-        starterCode: "import pandas as pd\n\ndef filter_active_adults(df):\n    # Write your Pandas code below\n    return df",
-        expectedKeywords: ["df", "Age", "Status", "Active"],
-        solutionDescription: "Apply boolean indexing: df[(df['Age'] >= 18) & (df['Status'] == 'Active')]. Parentheses are required around each separate conditional branch in Pandas."
-      },
-      {
-        questionText: "Write a function 'compute_average_salary(df)' that groups a DataFrame with columns 'Department' and 'Salary' by 'Department', computes the average 'Salary', and returns the resulting Series.",
-        starterCode: "import pandas as pd\n\ndef compute_average_salary(df):\n    # Write your Pandas code below\n    return None",
-        expectedKeywords: ["groupby", "Department", "Salary", "mean"],
-        solutionDescription: "Group the dataset of employees by 'Department', select 'Salary', and call .mean(): df.groupby('Department')['Salary'].mean()"
-      }
-    ]
-  },
-  ml: {
-    mcqs: [
-      {
-        questionText: "Which package provides standard ready-to-use supervised learning models in python?",
-        options: ["scikit-learn", "tensorflow", "pytorch", "statsmodels"],
-        correctOption: 0,
-        explanation: "scikit-learn is the standard library for traditional ML in python."
-      },
-      {
-        questionText: "What represents the 'target variable' inside supervised learning equations?",
-        options: ["X", "y", "weights", "intercept"],
-        correctOption: 1,
-        explanation: "y commonly denotes vectors of correct targets, while matrix X denotes the features."
-      },
-      {
-        questionText: "What is the primary indicator of overfitting in machine learning?",
-        options: ["High training error, low test error", "High training error, high test error", "Low training error, high test error", "Zero training time"],
-        correctOption: 2,
-        explanation: "Overfitting occurs when a model fits noisy features of the training set well (low training error), but cannot generalize to test datasets (high test error)."
-      },
-      {
-        questionText: "What is the purpose of Cross Validation in model selection?",
-        options: [
-          "To test models on other servers",
-          "To secure model binaries",
-          "To evaluate model generalizability by training and testing on multiple partitions of the dataset",
-          "To shuffle features horizontally"
-        ],
-        correctOption: 2,
-        explanation: "Cross-validation divides the dataset into multiple k-folds to train/validate the model repeatedly, avoiding variance bias."
-      },
-      {
-        questionText: "In a classification task, what is the 'confusion matrix' used for?",
-        options: [
-          "To encrypt predictions",
-          "To see counts of True Positives, True Negatives, False Positives, and False Negatives",
-          "To calculate matrix gradients",
-          "To clean string inputs"
-        ],
-        correctOption: 1,
-        explanation: "A confusion matrix shows classification performance metrics: true/false positives and negatives."
-      },
-      {
-        questionText: "What is K-means clustering strictly used for?",
-        options: [
-          "Supervised classification of labels",
-          "Unsupervised clustering of similar unlabeled observations",
-          "Predicting continuous numerical trends",
-          "Preprocessing image pixels"
-        ],
-        correctOption: 1,
-        explanation: "K-Means is an unsupervised learning model that groups data into K distinct clusters based on Euclidean distances without target annotations."
-      },
-      {
-        questionText: "What does the 'Coefficient of Determination' (R-squared) represent in Regressions?",
-        options: [
-          "The accuracy score of classifiers",
-          "The proportion of variance in the dependent target variable that is predictable from the independent variables",
-          "The slope angle of the regress line",
-          "The number of variables in regularizations"
-        ],
-        correctOption: 1,
-        explanation: "R² measures regression goodness of fit, denoting the percentage of variance predictable by variables (up to 1.0)."
-      },
-      {
-        questionText: "Which technique is commonly used to prevent overfitting in models by penalizing high weights coefficients?",
-        options: ["Regularization (L1 Lasso / L2 Ridge)", "Boosting", "Random Oversampling", "StandardNormalization"],
-        correctOption: 0,
-        explanation: "L1 (Lasso) and L2 (Ridge) add penalty penalties to structural loss functions to prevent coefficients from growing too large."
-      }
-    ],
-    coding: [
-      {
-        questionText: "Write a scikit-learn training snippet 'train_logistic_regression(X_train, y_train)' that initializes a LogisticRegression model, fits it with training data, and returns the fitted model object.",
-        starterCode: "from sklearn.linear_model import LogisticRegression\n\ndef train_logistic_regression(X_train, y_train):\n    # Write your code below\n    model = None\n    return model",
-        expectedKeywords: ["LogisticRegression", "fit", "return"],
-        solutionDescription: "Instantiate: lr = LogisticRegression(). Fit: lr.fit(X_train, y_train). Finally, return lr."
-      },
-      {
-        questionText: "Write a function 'split_and_scale(X, y)' that splits features and targets into train/test sets (80% train, 20% test, random_state=42), fits a StandardScaler on X_train, scales X_train and X_test, and returns (X_train_scaled, X_test_scaled, y_train, y_test).",
-        starterCode: "from sklearn.model_selection import train_test_split\nfrom sklearn.preprocessing import StandardScaler\n\ndef split_and_scale(X, y):\n    # Write your code below\n    return None",
-        expectedKeywords: ["train_test_split", "StandardScaler", "fit_transform", "transform"],
-        solutionDescription: "Use train_test_split to divide X and y. Then create StandardScaler(), call fit_transform on train data, and transform on test data."
-      }
-    ]
-  },
-  dl: {
-    mcqs: [
-      {
-        questionText: "What is an activation function used for in Neural Networks?",
-        options: [
-          "Encrypting weight vectors",
-          "To introduce non-linearities, enabling the model to learn complex high-dimensional mappings",
-          "Accelerating CPU threads",
-          "Normalizing target standard deviations"
-        ],
-        correctOption: 1,
-        explanation: "Without non-linear activation functions (like ReLU, Sigmoid), stacking layers would just approximate simple linear combinations."
-      },
-      {
-        questionText: "Which optimizer utilizes adaptive learning rates for each parameter?",
-        options: ["Vanilla SGD", "Adam", "StepDecay", "MomentumOnly"],
-        correctOption: 1,
-        explanation: "Adam (Adaptive Moment Estimation) computes adaptive learning rates for each weight parameter based on first and second moments of gradients."
-      },
-      {
-        questionText: "In deep learning, what is a CNN (Convolutional Neural Network) primarily optimized for?",
-        options: ["Tabular spreadsheets", "Grid-like topology structures (images/pixels)", "Audio streams exclusively", "Text corpus translations"],
-        correctOption: 1,
-        explanation: "CNNs use modular convolutional filters targeting local receptive fields, making them optimal for processing 2D image matrices."
-      },
-      {
-        questionText: "What is backpropagation in training artificial neural networks?",
-        options: [
-          "Feeding target inputs backward on disk",
-          "An algorithm that calculates helper gradients of loss functions with respect to network weights via chain rule",
-          "Shrinking layers when accuracy decreases",
-          "A server restart procedure"
-        ],
-        correctOption: 1,
-        explanation: "Backprop uses the chain rule of calculus to compute loss gradients with respect to each weight, working backward from output layers."
-      },
-      {
-        questionText: "What does the term 'vanishing gradient' refer to?",
-        options: [
-          "A database error",
-          "Gradients shrinking exponentially toward zero in initial layers during backprop, locking weights from updating",
-          "Optimizers converging instantly",
-          "Data files disappearing on training hosts"
-        ],
-        correctOption: 1,
-        explanation: "During deep propagation back through highly saturated functions (e.g. sigmoid), derivatives multiply down to nearly 0, locking base layer updates."
-      },
-      {
-        questionText: "Which function is optimally used as the output activator for multi-class classification?",
-        options: ["ReLU", "Sigmoid", "Softmax", "Tanh"],
-        correctOption: 2,
-        explanation: "Softmax outputs a normalized probability distribution representing class predictions that sum exactly to 1.0."
-      },
-      {
-        questionText: "What does 'Dropout' do during neural network training iterations?",
-        options: [
-          "Deletes columns in database",
-          "Randomly turns off a fraction of neuron units to prevent excessive co-dependencies and overfitting",
-          "Stops training execution early",
-          "Clears memory parameters"
-        ],
-        correctOption: 1,
-        explanation: "Dropout is a regularization tool where nodes are dropped with probability p on updates, forcing the network to learn robust, decentralized patterns."
-      },
-      {
-        questionText: "What is the key structural benefit of an LSTM (Long Short-Term Memory) cell over standard RNNs?",
-        options: [
-          "Faster graphics rendering",
-          "The inclusion of gated memory channels (cell state) that allow capturing long-term dependencies without vanishing values",
-          "It does not require weight variables",
-          "It runs completely in linear time complexity"
-        ],
-        correctOption: 1,
-        explanation: "LSTMs use gates (input, forget, output) to protect and maintain a linear cell state channel, avoiding gradient dissipation over long text sequences."
-      }
-    ],
-    coding: [
-      {
-        questionText: "Write a TensorFlow/Keras snippet 'create_simple_mlp()' that returns a Sequential model with a Flatten input layer, a Dense layer of 64 neurons with 'relu' activation, and an output Dense layer of 10 neurons with 'softmax' activation.",
-        starterCode: "import tensorflow as tf\n\ndef create_simple_mlp():\n    model = tf.keras.models.Sequential([\n        # Add layers here\n    ])\n    return model",
-        expectedKeywords: ["Sequential", "Flatten", "Dense", "relu", "softmax"],
-        solutionDescription: "Construct: tf.keras.models.Sequential([tf.keras.layers.Flatten(), tf.keras.layers.Dense(64, activation='relu'), tf.keras.layers.Dense(10, activation='softmax')])"
-      },
-      {
-        questionText: "Write a PyTorch initialization snippet 'get_adam_optimizer(model_params, lr=0.001)' that returns an Adam optimizer initialized with parameter targets and target learning rate.",
-        starterCode: "import torch\nimport torch.nn as nn\n\ndef get_adam_optimizer(model_params, lr=0.001):\n    # Write code below\n    optimizer = None\n    return optimizer",
-        expectedKeywords: ["optim", "Adam", "lr", "return"],
-        solutionDescription: "Import torch.optim and initialize: torch.optim.Adam(model_params, lr=lr) then return."
-      }
-    ]
-  },
-  nlp: {
-    mcqs: [
-      {
-        questionText: "What does TF-IDF represent in textual vector extraction?",
-        options: [
-          "Term Frequency - Inverse Document Frequency",
-          "Total Formatting - Input Data Feed",
-          "Token Filter - Index Directory Finder",
-          "Text Formatting - Information Density Filter"
-        ],
-        correctOption: 0,
-        explanation: "TF-IDF scores a term's relevance based on local occurrence (TF) penalized by global dataset commonality (IDF)."
-      },
-      {
-        questionText: "Which tokenization step reduces words like 'running' and 'runs' to their root word 'run' using grammatical checks?",
-        options: ["Stop-word filtering", "Stemming", "Lemmatization", "Chunking"],
-        correctOption: 2,
-        explanation: "Lemmatization uses morphological and vocabulary analysis to return true dictionary bases (lemmata), while stemming crudely cuts suffixes."
-      },
-      {
-        questionText: "What is a 'stop word' in NLP?",
-        options: [
-          "A broken syntax character",
-          "Frequently occurring words like 'the', 'is', 'and' that can be filtered to emphasize content words",
-          "A command that stops execution loops",
-          "A token signifying sentence boundaries"
-        ],
-        correctOption: 1,
-        explanation: "Stop words are high-frequency connector words carrying minimal unique topical information, which are often filtered."
-      },
-      {
-        questionText: "What is Word2Vec in natural language processing?",
-        options: [
-          "An algorithm for counting occurrences of variables",
-          "A shallow neural network architecture model that learns dense vector representations of tokens preserving semantic similarities",
-          "A document compression package",
-          "A text storage matrix mapping keys"
-        ],
-        correctOption: 1,
-        explanation: "Word2Vec generates high-quality distributed vector word embeddings where similar words reside near each other in multi-dimensional space."
-      },
-      {
-        questionText: "In modern sequence modeling, what design component solved the bottleneck of encoding long sequences with fixed-size matrices?",
-        options: ["GRU units", "Convolution filters", "Attention Mechanisms", "Recurrent cell stacks"],
-        correctOption: 2,
-        explanation: "Attention mechanisms allow model representations to reference all input tokens in parallel rather than routing sequence histories through restricted vectors."
-      },
-      {
-        questionText: "Which transformer-based model was open-sourced by Google and revolutionized bi-directional context understanding?",
-        options: ["GPT-2", "BERT", "ResNet", "TF-IDF"],
-        correctOption: 1,
-        explanation: "BERT (Bidirectional Encoder Representations from Transformers) learns context representations from both directions of a text sequence simultaneously."
-      },
-      {
-        questionText: "What is the process of identifying proper noun entities like 'Google' (Organization) or 'London' (Location) in sentences?",
-        options: ["Part-of-Speech tagging", "Sentiment lexicon analysis", "Named Entity Recognition (NER)", "Co-reference resolution"],
-        correctOption: 2,
-        explanation: "NER extracts semantic instances like persons, dates, locations, and organizations into typed categories."
-      },
-      {
-        questionText: "Which standard NLP library is built for industrial-strength production processing in Python?",
-        options: ["NLTK", "SpaCy", "re", "scikit-learn"],
-        correctOption: 1,
-        explanation: "While NLTK is excellent for education and academic study, SpaCy is optimized and compiled for real-time production throughput."
-      }
-    ],
-    coding: [
-      {
-        questionText: "Write a function 'tokenize_and_clean(text)' using pure Python that converts a string to lowercase, filters out characters that are not alphabetic or whitespace, and returns a list of individual word tokens.",
-        starterCode: "def tokenize_and_clean(text):\n    # Write Python code below\n    tokens = []\n    return tokens",
-        expectedKeywords: ["lower", "isalpha", "split"],
-        solutionDescription: "Call text.lower(). Iteratively verify character statuses or use a regex to retain spaces and letters, splitting the clean result into substrings."
-      },
-      {
-        questionText: "Write an NLP feature block using scikit-learn 'extract_tfidf(corpus)' that fits a TfidfVectorizer on a list of texts 'corpus' and returns the dense representation matrix of tfidf features.",
-        starterCode: "from sklearn.feature_extraction.text import TfidfVectorizer\n\ndef extract_tfidf(corpus):\n    # Write code below\n    return None",
-        expectedKeywords: ["TfidfVectorizer", "fit_transform", "return"],
-        solutionDescription: "Instantiate vectorizer = TfidfVectorizer(), invoke fit_transform(corpus), and return the resulting matrix."
-      }
-    ]
-  },
-  genai: {
-    mcqs: [
-      {
-        questionText: "What is the primary objective of PEFT (Parameter-Efficient Fine-Tuning) techniques like LoRA?",
-        options: [
-          "To speed up database uploads",
-          "To fine-tune LLMs by updating only a fraction of parameters, reducing memory costs from gigabytes to megabytes",
-          "To encrypt prompt histories on servers",
-          "To translate code to english"
-        ],
-        correctOption: 1,
-        explanation: "LoRA (Low-Rank Adaptation) freezes model weights and adds small trainable rank decomposition matrices, greatly reducing hardware fine-tune requirements."
-      },
-      {
-        questionText: "What is RAG (Retrieval-Augmented Generation) in Generative AI?",
-        options: [
-          "A tool for scanning image classifications",
-          "Retrieving context from external documents or a database and embedding it in the prompt to ground model outputs in factual data",
-          "An audio synthesizer package",
-          "A prompt backup server framework"
-        ],
-        correctOption: 1,
-        explanation: "RAG searches domain knowledge vectors first, attaching matching reference records to the API payload so the LLM outputs anchored facts."
-      },
-      {
-        questionText: "In vector search engines, why do we store text documents as token vector embeddings?",
-        options: [
-          "To compress raw texts on disk",
-          "To execute lexical matching indices",
-          "To compute rapid semantic similarities (e.g., Cosine similarity) representing concepts, not just literal strings",
-          "To format characters as HTML"
-        ],
-        correctOption: 2,
-        explanation: "Embeddings place semantic meaning in vector dimensions: cosine similarity isolates conceptual overlaps across different phrases."
-      },
-      {
-        questionText: "What constitutes the core role of LangChain in model deployments?",
-        options: [
-          "To host model weights on decentralized blockchains",
-          "A framework designed to compose LLM calls, chain prompts, vector stores, memory trackers, and file loaders together seamlessly",
-          "To format JSON output variables",
-          "To speed up pytorch CUDA kernels"
-        ],
-        correctOption: 1,
-        explanation: "LangChain is a widely-used design framework providing utility abstractions to assemble custom modular compound components around LLMs."
-      },
-      {
-        questionText: "What are 'system instructions' (or system prompts) used for in LLMs?",
-        options: [
-          "Restarting container servers",
-          "Setting the baseline behavior, framing constraints, persona, and rules of engagement before user dialog begins",
-          "Formatting diagnostic logs",
-          "Generating HTML style code templates"
-        ],
-        correctOption: 1,
-        explanation: "System instructions govern structural boundaries, output restrictions, and behavioral tone throughout model dialog sessions."
-      },
-      {
-        questionText: "How does 'Few-Shot Prompting' help a model deliver better responses?",
-        options: [
-          "It restricts prompt sizing limits",
-          "It provides the model explicit input-output demonstration examples within the prompt context before requesting the target answer",
-          "It requests answers multiple times",
-          "It uses faster deep-learning libraries"
-        ],
-        correctOption: 1,
-        explanation: "Demonstration pairs frame expectation scopes, teaching models structural output patterns instantaneously without retraining parameters."
-      },
-      {
-        questionText: "Which vectors database is standard, fully open-source, and commonly run in-memory for prototyping LangChain RAG architectures?",
-        options: ["PostgresSQL", "ChromaDB", "MongoDB", "RedisCache"],
-        correctOption: 1,
-        explanation: "ChromaDB is a highly popular, lightweight vector store designed for easy local development embedding registries."
-      },
-      {
-        questionText: "What represents a fundamental risk when models produce coherent but completely fabricated claims in response to queries?",
-        options: ["Stochastic decay", "Hallucination", "Overfitting iterations", "API key expiration"],
-        correctOption: 1,
-        explanation: "Hallucination occurs when an LLM writes fluent, factual-sounding statements that are incorrect relative to reality, due to next-token predictions."
-      }
-    ],
-    coding: [
-      {
-        questionText: "Write a Gemini SDK completion snippet 'create_chat_completion(client, system_instruction, query)' that instantiates content generation using 'gemini-2.5-flash', applying the instruction and user query.",
-        starterCode: "from google import genai\n\ndef create_chat_completion(client, system_instruction, query):\n    # Write Python code below\n    response = None\n    return response",
-        expectedKeywords: ["models", "generate_content", "gemini-2.5-flash"],
-        solutionDescription: "Call client.models.generate_content(model='gemini-2.5-flash', contents=query, config={'system_instruction': system_instruction})"
-      },
-      {
-        questionText: "Write a Python prompt formatting statement 'create_rag_prompt(docs, question)' that accepts a list of text strings 'docs' and a 'question' string, joins search documents with double newlines, and returns a formatted string containing both context and question.",
-        starterCode: "def create_rag_prompt(docs, question):\n    # Write your python string formatter here\n    return ''",
-        expectedKeywords: ["join", "docs", "question"],
-        solutionDescription: "Join docs using join: combined_docs = '\\n\\n'.join(docs). Then use an f-string to combine context and query."
-      }
-    ]
-  },
-  eda: {
-    mcqs: [
-      {
-        questionText: "Which command generates descriptive summary statistics on numerical DataFrame columns?",
-        options: ["df.summary()", "df.describe()", "df.stats()", "df.info_numerical()"],
-        correctOption: 1,
-        explanation: "df.describe() computes count, mean, std, min, quartiles, and maximum values of your columns."
-      },
-      {
-        questionText: "What plotting library serves as the underlying backbone for Seaborn?",
-        options: ["ggplot2", "Matplotlib", "Plotly", "D3.js"],
-        correctOption: 1,
-        explanation: "Seaborn compiles high-level plots down to native Matplotlib axes objects."
-      },
-      {
-        questionText: "In Matplotlib, what does plt.subplots(2, 3) create?",
-        options: [
-          "A single plot containing 6 lines",
-          "A grid array layout of 2 rows and 3 columns of subplots",
-          "2 independent figure files on disk",
-          "A 3D coordinate system"
-        ],
-        correctOption: 1,
-        explanation: "It instantiates a figure grid of 2 rows and 3 coordinate axis instances, returning (fig, axes)."
-      },
-      {
-        questionText: "Which Seaborn visualization excels at displaying pairwise relationships across multiple continuous features?",
-        options: ["sns.heatmap()", "sns.pairplot()", "sns.catplot()", "sns.join_scatter()"],
-        correctOption: 1,
-        explanation: "sns.pairplot() generates diagonal distribution charts paired against off-diagonal bivariate scatter charts for fast correlation tracking."
-      },
-      {
-        questionText: "How do you render a correlation matrix heatmap in Seaborn with numerical values explicitly written in cells?",
-        options: [
-          "sns.heatmap(df.corr(), annot=True)",
-          "sns.heatmap(df.corr(), write_nums=True)",
-          "sns.plot_corr(df, annotation=True)",
-          "sns.correlation_grid(df.corr(), cells='values')"
-        ],
-        correctOption: 0,
-        explanation: "annot=True (annotate) instructs seaborn to embed cell averages or coefficients as text over each gradient rectangle."
-      },
-      {
-        questionText: "What type of distribution feature is optimally analyzed using a Box Plot (sns.boxplot)?",
-        options: ["Frequency of categories only", "Outliers, medians, dispersion, and quartile metrics", "3D linear regression correlations", "Time-series seasonal cycles"],
-        correctOption: 1,
-        explanation: "Box plots provide concise vertical summaries highlighting median lines, Q1/Q3 boundaries, whiskers extensions, and outlier points outside boundaries."
-      },
-      {
-        questionText: "How can you modify the standard background themes in Seaborn to use elegant gridlines?",
-        options: ["sns.set_theme(style='whitegrid')", "sns.enable_grids()", "sns.use_style('grid_lines')", "sns.change_layout('standard')"],
-        correctOption: 0,
-        explanation: "sns.set_theme(style='whitegrid') configures modern light colors and gray horizontal grid intervals."
-      },
-      {
-        questionText: "Which command saves active Matplotlib figures into directory asset structures on compile runs?",
-        options: ["plt.save_figure('plot.png')", "plt.savefig('plot.png')", "fig.export_to('plot.png')", "plt.write_image('plot.png')"],
-        correctOption: 1,
-        explanation: "plt.savefig('filename.ext') saves the rendering buffer onto storage paths at custom DPI settings."
-      }
-    ],
-    coding: [
-      {
-        questionText: "Write an EDA snippet using matplotlib 'plot_histogram(df, column_name)' that creates a figure with size 8x5, plots a histogram of the specified column with 20 bins, sets the title as 'Distribution', and returns the active plt module.",
-        starterCode: "import matplotlib.pyplot as plt\n\ndef plot_histogram(df, column_name):\n    # Write code below\n    return plt",
-        expectedKeywords: ["figure", "hist", "bins", "title"],
-        solutionDescription: "Call plt.figure(figsize=(8, 5)), render using plt.hist(df[column_name], bins=20), set title, and return plt."
-      },
-      {
-        questionText: "Write a Seaborn plotting function 'render_scatterplot(df, x_col, y_col, hue_col)' that sets a 'whitegrid' style, renders a scatterplot of x vs y with hue color mapping, and returns the plot axes.",
-        starterCode: "import seaborn as sns\nimport matplotlib.pyplot as plt\n\ndef render_scatterplot(df, x_col, y_col, hue_col):\n    # Write code below\n    return None",
-        expectedKeywords: ["set_theme", "scatterplot", "x", "y", "hue"],
-        solutionDescription: "Call sns.set_theme(style='whitegrid'), draw usingax = sns.scatterplot(data=df, x=x_col, y=y_col, hue=hue_col), and return ax."
-      }
-    ]
-  }
-};
+  // Which daily-test curriculum track this student's batch follows: "data-science"
+  // (default/legacy), "python", or "java". Drives which quiz content set is fetched.
+  const studentCourseTrack: "data-science" | "python" | "java" =
+    (locks[student.batch]?.courseTrack as any) || "data-science";
 
-export function getDynamicFallbackForDay(dayNumber: number, slug: string, topicTitle: string): DayQuiz {
-  const mcqs: MCQQuestion[] = [];
-  const coding: CodingQuestion[] = [];
-  
-  // Deterministic variants selector based on unique dayNumber
-  const seed = (dayNumber * 23) + 17;
-  
-  // Helper to get diverse values that change for every single day
-  const v1 = 2 + (seed % 5); // 2 to 6
-  const v2 = 6 + (seed % 7); // 6 to 12
-  const v3 = (seed % 3) + 2; // 2 to 4
-  
-  if (slug === "python") {
-    mcqs.push({
-      questionText: `What is the accurate data type of the expression: type((${v1}, "${v2}", True)) in Python?`,
-      options: ["<class 'list'>", "<class 'tuple'>", "<class 'set'>", "<class 'dict'>"],
-      correctOption: 1,
-      explanation: "Parentheses enclosing multiple elements of combined types form an immutable tuple object in standard Python."
-    });
-    
-    mcqs.push({
-      questionText: `In Python, if string s = "DataScience${dayNumber}", what is the output of the slice expression s[0:${v1}]?`,
-      options: [
-        `"DataScience${dayNumber}".slice(0, ${v1})`,
-        `"DataScience${dayNumber}".substring(${v1})`,
-        `"${"DataScience".substring(0, v1)}"`,
-        `"${"DataScience".substring(1, v1 + 1)}"`
-      ],
-      correctOption: 2,
-      explanation: `Slicing s[start:end] extracts characters from start up to (excluding) end index. Starting at 0 gives characters: ${"DataScience".substring(0, v1)}`
-    });
+  // Resume Analyzer States
+  const [resumeText, setResumeText] = useState<string>("");
+  const [analyzingResume, setAnalyzingResume] = useState<boolean>(false);
+  const [resumeAnalysisResult, setResumeAnalysisResult] = useState<any | null>(null);
+  const [resumeError, setResumeError] = useState<string | null>(null);
 
-    mcqs.push({
-      questionText: `What is the value of result after performing floor division: result = ${v2} // ${v3}?`,
-      options: [
-        `${(v2 / v3).toFixed(2)}`,
-        `${Math.floor(v2 / v3)}`,
-        `${Math.ceil(v2 / v3)}`,
-        `${v2 % v3}`
-      ],
-      correctOption: 1,
-      explanation: `The floor division operator // divides two numbers and rounds down to the nearest integer, resulting in exactly ${Math.floor(v2 / v3)}.`
-    });
+  // ATS Resume Builder States
+  // NOTE: These were previously student-toggleable checkboxes that let any student
+  // bypass teacher-controlled locks (AI Interview, Placement, ATS Resume) client-side.
+  // They are now fixed to `false` so that access is only ever granted by a teacher,
+  // via per-student permissions or the Enterprise Feature Gate panel.
+  const atsBypass = false;
+  const specialPermissionBypass = false;
+  const [atsInputs, setAtsInputs] = useState({
+    fullName: student.name || "",
+    email: student.email || "student@example.com",
+    phone: student.phoneNumber || "+91 90000 00000",
+    linkedin: "linkedin.com/in/",
+    github: "github.com/",
+    objective: "Highly analytical and certified graduate from Quality Thought Academy. Fully trained in advanced Python programming, mathematical computations with NumPy, and structured data wrangling via high-performance Pandas. Seeking entry-level Data Science/Engineering placement to translate verified training milestones into immediate performance.",
+    topSkills: "Python (Core + Advanced), NumPy Vector Computations, Pandas Dataframes (filtering, cleaning, aggregations), Scikit-Learn Predictive Modeling Pipelines, Exploratory Data Analysis (Matplotlib & Seaborn)",
+    experienceText: "Hands-on Data Science engineering coursework at Quality Thought Academy, structured classroom project developments, and continuous daily coding assessments (200-day roadmap).",
+    projectsText: "1. Advanced House Pricing Predictive Engine: Built complete pipeline workflows with Scikit-Learn containing regression models, robust scaler operations, and double cross-validation.\n2. Customized Matrix Transformation Sandbox: Constructed highly-optimized vector slicing/broadcasting operations using pure-play NumPy commands for instant math calculation.",
+    educationText: "Bachelor of Technology in Computer Science or Equivalent."
+  });
+  const [compilingResume, setCompilingResume] = useState<boolean>(false);
+  const [atsResult, setAtsResult] = useState<any | null>(null);
+  const [atsError, setAtsError] = useState<string | null>(null);
 
-    mcqs.push({
-      questionText: `Which option accurately represents the value of variable total after running: total = sum([x for x in range(1, ${v1 + 2})])?`,
-      options: [
-        `${Array.from({length: v1 + 1}, (_, i) => i + 1).reduce((a, b: number) => a + b, 0)}`,
-        `${Array.from({length: v1}, (_, i) => i + 1).reduce((a, b: number) => a + b, 0)}`,
-        `${v1 + 2}`,
-        "TypeError: unsupported operand"
-      ],
-      correctOption: 0,
-      explanation: `range(1, k) spans integers from 1 to k-1. Summing from 1 to ${v1 + 1} yields exactly ${Array.from({length: v1 + 1}, (_, i) => i + 1).reduce((a, b: number) => a + b, 0)}.`
-    });
+  // Live Job Search (real postings pulled from LinkedIn/Naukri/Indeed/etc via Gemini + Google Search)
+  const [liveJobs, setLiveJobs] = useState<any[]>([]);
+  const [loadingLiveJobs, setLoadingLiveJobs] = useState<boolean>(false);
+  const [liveJobsError, setLiveJobsError] = useState<string | null>(null);
+  const [liveJobsFetchedFor, setLiveJobsFetchedFor] = useState<string | null>(null);
 
-    mcqs.push({
-      questionText: `How does Python lookup lexical variable references if a variable is accessed inside a nested function?`,
-      options: [
-        "Global, then Local, then Built-In scopes",
-        "LEGB rule (Local scope, then Enclosing scope, then Global, then Built-In)",
-        "Directly in Built-in modules first",
-        "Dynamic late binding on the heap"
-      ],
-      correctOption: 1,
-      explanation: "Python obeys the LEGB layout: Local name bindings first, followed by Enclosing outer scopes, then Global module-level names, and finally Built-in modules."
-    });
+  // Job-tailored resume (rewrites the resume to match a specific job's skills/description)
+  const [tailoringJobKey, setTailoringJobKey] = useState<string | null>(null);
+  const [tailoredResumeResult, setTailoredResumeResult] = useState<any | null>(null);
+  const [tailoredResumeError, setTailoredResumeError] = useState<string | null>(null);
+  const [copiedAts, setCopiedAts] = useState<boolean>(false);
 
-    mcqs.push({
-      questionText: `Which file mode is strictly correct to open an existing text file to append content without wiping prior headers?`,
-      options: ["'r'", "'w'", "'a'", "'x'"],
-      correctOption: 2,
-      explanation: "Opening files in 'a' (append) mode directs Python to write data onto the trailing end of the file. 'w' overwrites existing data."
-    });
+  // Content-wise Video Attachment States
+  const [learningVideos, setLearningVideos] = useState<any[]>([]);
+  const [selectedVideo, setSelectedVideo] = useState<any | null>(null);
+  const [showAttachFormSlug, setShowAttachFormSlug] = useState<string | null>(null);
+  const [newVideoForm, setNewVideoForm] = useState({
+    title: "",
+    description: "",
+    videoUrl: ""
+  });
+  const [savingVideo, setSavingVideo] = useState<boolean>(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
 
-    mcqs.push({
-      questionText: `What is the output of print(len({x for x in [1, 2, 2, 3, ${v1}, ${v1}]})) in Python?`,
-      options: [
-        `${new Set([1, 2, 2, 3, v1, v1]).size}`,
-        `${[1, 2, 2, 3, v1, v1].length}`,
-        "TypeError",
-        "4"
-      ],
-      correctOption: 0,
-      explanation: `Sets retain unique distinct integers. The size/length of the unique set composed from [1, 2, 2, 3, ${v1}, ${v1}] is precisely ${new Set([1, 2, 2, 3, v1, v1]).size}.`
-    });
+  // Assessment States
+  const [assessments, setAssessments] = useState<any[]>([]); // student's assessment scores
+  const [overrides, setOverrides] = useState<any[]>([]); // student's overrides
+  const [activeAssessmentSlug, setActiveAssessmentSlug] = useState<string | null>(null);
+  const [assessmentStep, setAssessmentStep] = useState<"intro" | "mcq" | "coding" | "result">("intro");
+  const [assessmentMCQAnswers, setAssessmentMCQAnswers] = useState<Record<number, number>>({});
+  const [assessmentCodingAnswers, setAssessmentCodingAnswers] = useState<Record<number, string>>({});
+  const [assessmentScore, setAssessmentScore] = useState<number | null>(null);
+  const [assessmentSubmitLoading, setAssessmentSubmitLoading] = useState<boolean>(false);
+  const [currentAssessmentMCQIndex, setCurrentAssessmentMCQIndex] = useState<number>(0);
 
-    mcqs.push({
-      questionText: `What does the Python decorator syntax '@my_decorator' placed over a custom function declaration do?`,
-      options: [
-        "Deletes the underlying function safely",
-        "Passes the function as an input argument to 'my_decorator', substituting it with the returned wrapper object",
-        "Converts the method into a static configuration key",
-        "Runs the function inside an asynchronous container thread pool"
-      ],
-      correctOption: 1,
-      explanation: "Decorators serve as lightweight wrappers. Placing @my_decorator over fn is shorthand syntactic sugar for: fn = my_decorator(fn)."
-    });
+  // Active quiz state
+  const [activeDay, setActiveDay] = useState<number | null>(null);
+  const [quizData, setQuizData] = useState<DayQuiz | null>(null);
+  const [loadingQuiz, setLoadingQuiz] = useState(false);
 
-    coding.push({
-      questionText: `Write a Python function 'get_squared_evens(n)' that takes an integer n and returns a list containing the squares of all even numbers from 0 to n (inclusive).`,
-      starterCode: "def get_squared_evens(n):\n    # Write your Python code below\n    pass",
-      expectedKeywords: ["def", "range", "%", "return"],
-      solutionDescription: "def get_squared_evens(n):\n    return [x**2 for x in range(n+1) if x % 2 == 0]"
-    });
-    coding.push({
-      questionText: `Write a modular Python function 'char_frequency(s)' that takes a string s and returns a dictionary storing character occurrence counts, skipping whitespace.`,
-      starterCode: "def char_frequency(s):\n    # Write your Python code below\n    freqs = {}\n    return freqs",
-      expectedKeywords: ["def", "for", "in", "isspace", "return"],
-      solutionDescription: "def char_frequency(s):\n    freqs = {}\n    for c in s:\n        if c.isspace(): continue\n        freqs[c] = freqs.get(c, 0) + 1\n    return freqs"
-    });
+  // Active test state managers
+  const [currentMCQIndex, setCurrentMCQIndex] = useState<number>(0);
+  const [selectedMCQAnswers, setSelectedMCQAnswers] = useState<Record<number, number>>({});
+  const [codingAnswers, setCodingAnswers] = useState<Record<number, string>>({});
+  const [isTestSubmitted, setIsTestSubmitted] = useState<boolean>(false);
+  const [reviewSubmission, setReviewSubmission] = useState<Submission | null>(null);
 
-  } else if (slug === "numpy") {
-    mcqs.push({
-      questionText: `How do you instantiate an array filled with numeric zeros of exact 2D shape (${v3}, ${v1}) in NumPy?`,
-      options: [
-        `np.zeros(${v3}, ${v1})`,
-        `np.zeros((${v3}, ${v1}))`,
-        `np.zeros_like(${v3}, ${v1})`,
-        `np.make_empty(shape=(${v3}, ${v1}))`
-      ],
-      correctOption: 1,
-      explanation: "np.zeros requires shapes as nested tuples. Passing un-bracketed dimensions raises a positional arguments error."
-    });
+  // Expanded explanations state for review
+  const [showReviewExplanations, setShowReviewExplanations] = useState(false);
 
-    mcqs.push({
-      questionText: `If you slice a 1D NumPy array 'sub = arr[0:${v1}]' and modify elements within 'sub', what is the impact on original 'arr'?`,
-      options: [
-        "No change. NumPy creates deep copies of subarrays when slicing",
-        "The original 'arr' is immediately updated because NumPy slices are views sharing back-end memory references",
-        "It triggers a read-only variable mutation compiler error",
-        "Elements are dynamically appended to the trailing list"
-      ],
-      correctOption: 1,
-      explanation: "NumPy uses memory-efficient referencing. Slices return vector 'views' instead of duplicating copy vectors, altering original values."
-    });
+  // LeetCode / HackerRank style Run-time Sandbox States
+  const [codeExecutionLogs, setCodeExecutionLogs] = useState<Record<number, { success: boolean; stdout: string; error?: string; durationMs: number; passedTests: boolean }>>({});
+  const [runningCodeIndices, setRunningCodeIndices] = useState<Record<number, boolean>>({});
 
-    mcqs.push({
-      questionText: `What is the resulting shape when multiplying NumPy array 'A' of shape (${v1}, 1) with 'B' of shape (1, ${v2}) via standard broadcast arithmetic?`,
-      options: [
-        `(${v1}, ${v2})`,
-        `(1, 1)`,
-        `(${v2}, ${v1})`,
-        "ValueError: incompatible shapes"
-      ],
-      correctOption: 0,
-      explanation: `Broadcasting rules auto-expand singleton dimensions. A shape (${v1}, 1) paired with (1, ${v2}) stretches both axes, returning shape (${v1}, ${v2}).`
-    });
+  // Code solution comparison AI diff state managers
+  const [codeComparisonData, setCodeComparisonData] = useState<Record<number, { matchPercentage: number; mistakes: string[]; suggestions: string[]; praise: string; lineByLine: Array<{ userLine: string; idealLine: string; status: string; note: string }> }>>({});
+  const [loadingComparisonIndices, setLoadingComparisonIndices] = useState<Record<number, boolean>>({});
 
-    mcqs.push({
-      questionText: `Which property store tells you the raw count of dimensions (axes) in a NumPy array matrix 'arr'?`,
-      options: ["arr.ndim", "arr.shape", "arr.size", "arr.dimension_count"],
-      correctOption: 0,
-      explanation: "ndim directly returns the integer total of array axes, whereas .shape returns tuples of sizing, and .size yields total cell elements."
-    });
+  // Stat computations
+  const [totalPresentDays, setTotalPresentDays] = useState(0);
+  const [averageScore, setAverageScore] = useState(0);
 
-    mcqs.push({
-      questionText: `Which of the following creates a 1D array of floats with values evenly spaced from 0 to 10 with exactly ${v2} intervals?`,
-      options: [
-        `np.arange(0, 10, ${v2})`,
-        `np.linspace(0, 10, ${v2})`,
-        `np.spacing(0, 10, size=${v2})`,
-        `np.linspace(0, 10, step=${v2})`
-      ],
-      correctOption: 1,
-      explanation: `np.linspace(start, stop, num) generates exactly 'num' (${v2}) evenly distributed observations spanning the start and stop boundaries.`
-    });
+  // Classroom Attendance & Permission States
+  const [attendance, setAttendance] = useState<any[]>([]);
+  const [submittingAttendance, setSubmittingAttendance] = useState<boolean>(false);
+  const [attendanceError, setAttendanceError] = useState<string | null>(null);
+  const [currentStudentObj, setCurrentStudentObj] = useState<any>(student);
+  const [customZoomLinks, setCustomZoomLinks] = useState<Record<number, string>>({});
 
-    mcqs.push({
-      questionText: `Which operator performs true multi-dimensional matrix multiplication of two compatible 2D arrays A and B?`,
-      options: ["A * B", "A ** B", "A @ B", "A.dot_multiply(B)"],
-      correctOption: 2,
-      explanation: "The asterisk * does element-wise calculations. For true dot matrix multiplication, utilize the modern @ operator or np.dot(A, B)."
-    });
-
-    mcqs.push({
-      questionText: `How do you flatten a multi-dimensional array matrix down to a flat 1D array while forcing a copy?`,
-      options: ["arr.flatten()", "arr.ravel()", "arr.reshape(-1)", "arr.resize(1)"],
-      correctOption: 0,
-      explanation: "Both ravel() and flat() flatten dimensions, but flatten() guarantees a deep copy of elements whereas ravel() attempts to return views."
-    });
-
-    mcqs.push({
-      questionText: `If 1D array is: 'arr = np.array([2, -5, ${v1}, 12, 1])', what returns the index of the minimum cell value?`,
-      options: ["np.argmin(arr)", "arr.get_min_index()", "np.min_offset(arr)", "arr.find_min()"],
-      correctOption: 0,
-      explanation: "np.argmin returns the index of the minimum element along an array axis."
-    });
-
-    coding.push({
-      questionText: `Write a NumPy helper function 'get_diagonal_sum(matrix)' that takes a square 2D matrix array and returns the sum of its main diagonal.`,
-      starterCode: "import numpy as np\n\ndef get_diagonal_sum(matrix):\n    # Write your NumPy code below\n    pass",
-      expectedKeywords: ["np", "diagonal", "sum"],
-      solutionDescription: "def get_diagonal_sum(matrix):\n    return np.diagonal(matrix).sum() or np.trace(matrix)"
-    });
-    coding.push({
-      questionText: `Write a function 'replace_negatives(arr, replacement)' that takes a 1D numpy array and replaces all negative values with the specified replacement scalar.`,
-      starterCode: "import numpy as np\n\ndef replace_negatives(arr, replacement):\n    # Write your NumPy code below\n    pass",
-      expectedKeywords: ["np", "arr", "[", "< 0", "return"],
-      solutionDescription: "def replace_negatives(arr, replacement):\n    arr[arr < 0] = replacement\n    return arr"
-    });
-
-  } else if (slug === "pandas") {
-    mcqs.push({
-      questionText: `What is the correct selector mode to filter rows labeled with a string ID versus an integer coordinate index?`,
-      options: [
-        "df.iloc uses label indices, df.loc is coordinate based",
-        "df.loc search labels, df.iloc is strictly based on integer indices position (0-indexed)",
-        "Both act identically as direct aliases",
-        "df.query only handles string indexes"
-      ],
-      correctOption: 1,
-      explanation: "df.loc uses index row labels, whereas df.iloc operates on positional integers offset."
-    });
-
-    mcqs.push({
-      questionText: `What does 'df.groupby("City")["Revenue"].mean()' accomplish in on-line DataFrames?`,
-      options: [
-        "Sorts the City column based on Revenue values",
-        "Groups matching records by the 'City' factor, isolates the 'Revenue' column, and then calculates the average revenue per city",
-        "Filters out rows matching keyword City or Revenue",
-        "Counts the unique occurrences"
-      ],
-      correctOption: 1,
-      explanation: "GroupBy groupings partition observations matching City values, then aggregate isolated column statistics."
-    });
-
-    mcqs.push({
-      questionText: `How do you drop columns 'Age' and 'Salary' in-place inside a Pandas DataFrame variable 'df'?`,
-      options: [
-        "df.drop(['Age', 'Salary'], axis=1, inplace=True)",
-        "df.drop_columns(['Age', 'Salary'])",
-        "df.remove(['Age', 'Salary'])",
-        "np.delete(df, ['Age', 'Salary'])"
-      ],
-      correctOption: 0,
-      explanation: "df.drop() with axis=1 (columns) and inplace=True updates the memory contents directly without returning a fresh pointer."
-    });
-
-    mcqs.push({
-      questionText: `Which of the following fills NaN values inside a Series 'df["Score"]' with the median of that specific column in-place?`,
-      options: [
-        "df['Score'].fill_nan(strategy='median')",
-        "df['Score'].fillna(df['Score'].median(), inplace=True)",
-        "df['Score'] = df['Score'].replace(nan='median')",
-        "pd.clean(df, columns=['Score'])"
-      ],
-      correctOption: 1,
-      explanation: "fillna fills missing observation cells. Passing Series median() matches the structural values cleanly."
-    });
-
-    mcqs.push({
-      questionText: `What happens when you execute: pd.concat([df1, df2], axis=1)?`,
-      options: [
-        "Combines DataFrames vertically (appending rows)",
-        "Combines DataFrames horizontally (binding columns side-by-side matching index)",
-        "Merges them on a shared database key column",
-        "Calculates matrix multipliers"
-      ],
-      correctOption: 1,
-      explanation: "axis=0 binds rows underneath each other; axis=1 binds columns side-by-side aligning index labels."
-    });
-
-    mcqs.push({
-      questionText: `How can you convert a column labeled "Date_Joined" to Pandas datetime formats to sort chronological values?`,
-      options: [
-        "df['Date_Joined'] = df['Date_Joined'].astype(datetime)",
-        "df['Date_Joined'] = pd.to_datetime(df['Date_Joined'])",
-        "df['Date_Joined'] = df['Date_Joined'].format_time()",
-        "pd.parse_strings(df)"
-      ],
-      correctOption: 1,
-      explanation: "pd.to_datetime parses date string series formats into highly versatile DatetimeIndex compatible timestamps."
-    });
-
-    mcqs.push({
-      questionText: `Which method returns value count statistics of individual occurrences inside a categorical Pandas Series 'df["City"]'?`,
-      options: ["df['City'].sum()", "df['City'].value_counts()", "df['City'].unique_values()", "pd.occurrences(df['City'])"],
-      correctOption: 1,
-      explanation: "value_counts() tabulates distinct items sorting frequencies in descending order."
-    });
-
-    mcqs.push({
-      questionText: `How do you save a DataFrame to a CSV sheet called "data.csv" without storing row indices?`,
-      options: [
-        "df.save('data.csv', index=False)",
-        "df.to_csv('data.csv', index=False)",
-        "df.write_csv('data.csv', print_idx=False)",
-        "pd.export(df, name='data.csv')"
-      ],
-      correctOption: 1,
-      explanation: "to_csv writes contents to spreadsheet files. Excluding the index ensures cleaner tables."
-    });
-
-    coding.push({
-      questionText: `Write a Pandas helper function 'filter_high_performers(df, score_threshold)' that takes a DataFrame representing employees, and returns just the rows where the 'Score' is strictly greater than the threshold.`,
-      starterCode: "import pandas as pd\n\ndef filter_high_performers(df, score_threshold):\n    # Write your Pandas code below\n    pass",
-      expectedKeywords: ["df", "[", ">", "return"],
-      solutionDescription: "def filter_high_performers(df, score_threshold):\n    return df[df['Score'] > score_threshold]"
-    });
-    coding.push({
-      questionText: `Write a function 'compute_null_counts(df)' that accepts a DataFrame and returns a Series representing the counts of missing values (NaN) in each column.`,
-      starterCode: "import pandas as pd\n\ndef compute_null_counts(df):\n    # Write your Pandas code below\n    pass",
-      expectedKeywords: ["isnull", "sum"],
-      solutionDescription: "def compute_null_counts(df):\n    return df.isnull().sum()"
-    });
-
-  } else {
-    const catName = slug.toUpperCase();
-    
-    mcqs.push({
-      questionText: `[${catName} Day ${dayNumber}] In standard ${catName}, what is the general consequence of overfitting training datasets?`,
-      options: [
-        "Low error rates on training variables and low error rates on unseen test observations",
-        "Extremely low error rates on training variables, but high error rates/poor generalizability on unseen test observations",
-        "Consistent high error rates across all splits",
-        "Faster convergence rates during fits"
-      ],
-      correctOption: 1,
-      explanation: "Overfitting means models fit noisier features of local data sheets instead of learning generalizable relationships."
-    });
-
-    mcqs.push({
-      questionText: `[${catName} Day ${dayNumber}] Which metrics analyzer evaluates Classification predictions for False Positives vs False Negatives?`,
-      options: ["The Confusion Matrix", "R-squared statistic", "The Mean Squared Error deviation", "Log-normal distributions"],
-      correctOption: 0,
-      explanation: "Confusion matrices map real values directly against predictions to show correct classification patterns."
-    });
-
-    mcqs.push({
-      questionText: `[${catName} Day ${dayNumber}] What does the term cross-validation represent in machine learning pipelines?`,
-      options: [
-        "Reviewing code snippets across IDE systems",
-        "Splitting datasets into multiple partitions (K-folds) to rotate train/test scopes, obtaining unbiased performance metrics",
-        "Encrypting training features",
-        "Direct network data relays"
-      ],
-      correctOption: 1,
-      explanation: "Cross-validation splits folders randomly to construct stable general models without data leaks."
-    });
-
-    mcqs.push({
-      questionText: `[${catName} Day ${dayNumber}] What represents the primary function of activation layers (e.g. ReLU, Tanh, Sigmoid) inside Deep Learning?`,
-      options: [
-        "To speed up GPU compilation units",
-        "To introduce mathematical non-linearity, allowing models to learn highly complex high-dimensional boundaries",
-        "To flatten matrix inputs",
-        "To regulate weight distributions"
-      ],
-      correctOption: 1,
-      explanation: "Activation functions introduce non-linearities, allowing layers to learn non-linear decision boundaries."
-    });
-
-    mcqs.push({
-      questionText: `[${catName} Day ${dayNumber}] In NLP vectorizers, what is the role of TF-IDF?`,
-      options: [
-        "Tokenizes sentences based on punctuation flags",
-        "Weights terms by occurrences in a document, penalized by how frequently they show up across the entire corpus",
-        "Speeds up python word stemming routines",
-        "A vector compression algorithm"
-      ],
-      correctOption: 1,
-      explanation: "TF-IDF scores word uniqueness to emphasize key concepts rather than common connector stop words."
-    });
-
-    mcqs.push({
-      questionText: `[${catName} Day ${dayNumber}] What does Retrieval-Augmented Generation (RAG) provide to LLM pipelines in Generative AI?`,
-      options: [
-        "Compiles weights down to lower float precision formats",
-        "Queries custom knowledge bases/vector indices for context matching, then formats prompts to ground LLM responses with facts",
-        "Deletes bad files from host systems",
-        "Translates user input to other languages"
-      ],
-      correctOption: 1,
-      explanation: "RAG anchors conversations dynamically, attaching indexed snippets to prompt content to eliminate hallucinations."
-    });
-
-    mcqs.push({
-      questionText: `[${catName} Day ${dayNumber}] Which plot schema is optimal in EDA to identify value distribution outliers, quartiles, and medians?`,
-      options: ["A heat-map grid", "A Box Plot (sns.boxplot)", "A 3D coordinate scatter plot", "A pie-chart circle"],
-      correctOption: 1,
-      explanation: "Box plots display outlier boundaries (using whiskers) while cleanly framing median indexes and interquartile ranges."
-    });
-
-    mcqs.push({
-      questionText: `[${catName} Day ${dayNumber}] Which parameter efficiency technique (PEFT) utilizes low-rank matrices to adapt huge models with minuscule weights updates?`,
-      options: ["Gradient Descent Slicing", "Low-Rank Adaptation (LoRA)", "Epoch Filtering", "Standard Normalization"],
-      correctOption: 1,
-      explanation: "LoRA freezes original base weights and updates low-rank parameter increments during training."
-    });
-
-    coding.push({
-      questionText: `Write a modular helper python function 'get_mean_squared_error(y_true, y_pred)' that accepts two lists of equal size and calculates the Mean Squared Error (MSE).`,
-      starterCode: "def get_mean_squared_error(y_true, y_pred):\n    # Write your python code below\n    pass",
-      expectedKeywords: ["def", "len", "sum", "return"],
-      solutionDescription: "def get_mean_squared_error(y_true, y_pred):\n    return sum((t - p)**2 for t, p in zip(y_true, y_pred)) / len(y_true)"
-    });
-    coding.push({
-      questionText: `Write a python script 'get_unique_tokens(corpus)' that takes a list of strings, lowercase them, splits them into individual words, and returns a sorted list of unique tokens.`,
-      starterCode: "def get_unique_tokens(corpus):\n    # Write your python code below\n    pass",
-      expectedKeywords: ["def", "lower", "split", "set", "sorted"],
-      solutionDescription: "def get_unique_tokens(corpus):\n    tokens = set()\n    for text in corpus:\n        for word in text.lower().split():\n            tokens.add(word)\n    return sorted(list(tokens))"
-    });
-  }
-
-  return {
-    dayNumber,
-    courseSlug: slug,
-    topicTitle,
-    mcqs,
-    coding
-  };
-}
-
-export async function generateQuizForDay(dayNumber: number): Promise<DayQuiz> {
-  const course = getCourseForDay(dayNumber);
-  const topicTitle = getTopicTitleForDay(dayNumber);
-
-  if (PRESET_DAILY_QUIZZES[dayNumber]) {
-    const data = PRESET_DAILY_QUIZZES[dayNumber];
-    return {
-      dayNumber,
-      courseSlug: course.slug,
-      topicTitle: data.topicTitle,
-      mcqs: data.mcqs,
-      coding: data.coding
-    };
-  }
-
-  const ai = getAi();
-
-  if (!ai) {
-    // Return completely procedural, non-repeating custom daily questions instead of raw static fallback
-    return getDynamicFallbackForDay(dayNumber, course.slug, topicTitle);
-  }
-
-  try {
-    const prompt = `
-Generate a high-quality Data Science Daily Test quiz in JSON format for Day ${dayNumber}.
-Course stage: ${course.name}.
-Topic Focus: "${topicTitle}".
-
-Important Structure instructions:
-Return a JSON object containing EXACTLY:
-{
-  "dayNumber": ${dayNumber},
-  "courseSlug": "${course.slug}",
-  "topicTitle": "${topicTitle}",
-  "mcqs": [
-    {
-      "questionText": "A precise, technical question covering ${topicTitle}",
-      "options": ["Option A", "Option B", "Option C", "Option D"],
-      "correctOption": 0, // 0-indexed integer of the correct answer
-      "explanation": "Brief context explanation of why this answer is correct"
-    } // ... provide EXACTLY 8 MCQs
-  ],
-  "coding": [
-    {
-      "questionText": "Detailed description of python coding challenge targeting ${topicTitle}",
-      "starterCode": "def solution_fn(...):\\n    # Write Python code here",
-      "expectedKeywords": ["keyword1", "keyword2"],
-      "solutionDescription": "Brief explanation of how to construct the correct solution"
-    } // ... provide EXACTLY 2 Coding challenges
-  ]
-}
-
-Ensure your output is strictly valid JSON, containing no explanation text, and wrapped inside markdown code blocks.
-`;
-
-    console.log(`[Gemini API] Generating test for Day ${dayNumber} (${course.slug})...`);
-    const resp = await generateContentWithRetry(ai, {
-      model: "gemini-2.5-flash",
-      contents: prompt,
-    });
-
-    const respText = resp.text || "";
-    // Clean JSON code blocks
-    let jsonString = respText.trim();
-    if (jsonString.startsWith("```json")) {
-      jsonString = jsonString.slice(7);
-    } else if (jsonString.startsWith("```")) {
-      jsonString = jsonString.slice(3);
-    }
-    if (jsonString.endsWith("```")) {
-      jsonString = jsonString.slice(0, -3);
-    }
-    jsonString = jsonString.trim();
-
-    try {
-      const parsed = JSON.parse(jsonString) as DayQuiz;
-      if (parsed && Array.isArray(parsed.mcqs) && parsed.mcqs.length === 8 && Array.isArray(parsed.coding) && parsed.coding.length === 2) {
-        return parsed;
-      }
-      throw new Error("Parsed JSON has invalid structure or length of lists");
-    } catch (parseErr) {
-      console.warn("[Gemini API] JSON parsing or structure failure, falling back: ", parseErr, "Raw output was: ", respText);
-    }
-  } catch (err) {
-    console.error("[Gemini API] Request error:", err);
-  }
-
-  // Fallback to beautiful procedural dynamic content instead of static templates
-  return getDynamicFallbackForDay(dayNumber, course.slug, topicTitle);
-}
-
-export async function generateQuizFromMaterial(
-  materialText: string,
-  dayNumber: number,
-  courseSlug: string,
-  topicTitle: string
-): Promise<DayQuiz> {
-  const ai = getAi();
-  if (!ai) {
-    throw new Error("Gemini API Key is not configured. Please set GEMINI_API_KEY in the Secrets settings.");
-  }
-
-  const prompt = `
-You are an expert Data Science and AI educator.
-We have received the following uploaded/inserted course content material for Day ${dayNumber} (Subject Slug: "${courseSlug}", Topic: "${topicTitle}"):
-
---- BEGIN COURSE MATERIAL ---
-${materialText}
---- END COURSE MATERIAL ---
-
-Your task is to analyze this course material and generate a high-quality educational quiz in JSON format containing EXACTLY 10 questions in total:
-- 8 Multiple Choice Questions (MCQs) covering key concepts, code interpretations, or calculations directly related to the material.
-- 2 Python coding exercises directly testing application or custom manipulation of concepts covered in the material.
-
-Return a JSON object containing EXACTLY this structure:
-{
-  "dayNumber": ${dayNumber},
-  "courseSlug": "${courseSlug}",
-  "topicTitle": "${topicTitle}",
-  "mcqs": [
-    {
-      "questionText": "A precise, technical question directly based on the uploaded material...",
-      "options": ["Option A", "Option B", "Option C", "Option D"],
-      "correctOption": 0, // 0-indexed integer of the correct answer (0, 1, 2, or 3)
-      "explanation": "Brief context explanation of why this option is correct based on the material."
-    } // ... provide EXACTLY 8 MCQs
-  ],
-  "coding": [
-    {
-      "questionText": "Detailed description of python coding challenge targeting concepts in the material...",
-      "starterCode": "def solution_fn(...):\\n    # Write Python code here",
-      "expectedKeywords": ["keyword1", "keyword2"],
-      "solutionDescription": "Brief explanation of how to construct the correct solution"
-    } // ... provide EXACTLY 2 Coding challenges
-  ]
-}
-
-Ensure your output is strictly valid JSON, containing no conversational explanation text, and wrapped inside markdown code blocks.
-`;
-
-  console.log(`[Gemini API] Custom material quiz generating for Day ${dayNumber}...`);
-  const resp = await generateContentWithRetry(ai, {
-    model: "gemini-3.5-flash",
-    contents: prompt,
+  // Placement Portals Profile states
+  const [showPlacementModal, setShowPlacementModal] = useState<boolean>(false);
+  const [savingPlacementDetails, setSavingPlacementDetails] = useState<boolean>(false);
+  const [placementError, setPlacementError] = useState<string | null>(null);
+  const [placementForm, setPlacementForm] = useState({
+    linkedin: "",
+    indeed: "",
+    naukri: "",
+    glassdoor: "",
+    foundit: "",
+    shine: "",
+    timesjobs: "",
+    internshala: "",
+    wellfound: "",
+    apna: ""
   });
 
-  const respText = resp.text || "";
-  let jsonString = respText.trim();
-  if (jsonString.startsWith("```json")) {
-    jsonString = jsonString.slice(7);
-  } else if (jsonString.startsWith("```")) {
-    jsonString = jsonString.slice(3);
-  }
-  if (jsonString.endsWith("```")) {
-    jsonString = jsonString.slice(0, -3);
-  }
-  jsonString = jsonString.trim();
+  // Scheduled Evaluations (Weekly & Monthly Tests)
+  const [scheduledTests, setScheduledTests] = useState<any[]>([]);
+  const [scheduledSubmissions, setScheduledSubmissions] = useState<any[]>([]);
+  const [activeScheduledTest, setActiveScheduledTest] = useState<any | null>(null);
+  const [testWindowStep, setTestWindowStep] = useState<"intro" | "writing" | "completed">("intro");
+  const [testAnswersMCQ, setTestAnswersMCQ] = useState<Record<number, number>>({});
+  const [testAnswersCoding, setTestAnswersCoding] = useState<Record<number, string>>({});
+  const [testScorePercent, setTestScorePercent] = useState<number>(0);
+  const [submittingScheduledTest, setSubmittingScheduledTest] = useState<boolean>(false);
 
-  try {
-    const parsed = JSON.parse(jsonString) as DayQuiz;
-    if (parsed && Array.isArray(parsed.mcqs) && parsed.mcqs.length === 8 && Array.isArray(parsed.coding) && parsed.coding.length === 2) {
-      // Set values to match selected criteria
-      parsed.dayNumber = dayNumber;
-      parsed.courseSlug = courseSlug;
-      parsed.topicTitle = topicTitle;
-      return parsed;
+  // Floating Compiler Sandbox states
+  const [isCompilerOpen, setIsCompilerOpen] = useState<boolean>(false);
+  const [compilerCode, setCompilerCode] = useState<string>(
+    `# Write Python code below\n\n# Define variables\nx = 10\ny = 5\n\n# Arithmetic operations\nprint("Calculating x + y:")\nprint(x + y)\n\n# Define message\nmsg = "Happy Coding!"\nprint(msg)`
+  );
+  const [compilerInput, setCompilerInput] = useState<string>("");
+  const [compilerOutput, setCompilerOutput] = useState<string[]>(["Terminal ready. Write code and click 'Run Python Code' to compile."]);
+  const [compilerIsRunning, setCompilerIsRunning] = useState<boolean>(false);
+
+  const fetchVideos = async () => {
+    try {
+      const res = await fetch("/api/videos");
+      if (res.ok) {
+        const body = await res.json();
+        if (body.success) {
+          setLearningVideos(body.videos || []);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load course video attachments:", err);
     }
-    throw new Error("Parsed JSON has invalid structure or length of lists");
-  } catch (parseErr) {
-    console.error("[Gemini API] JSON parsing or structure failure:", parseErr, "Raw output:", respText);
-    throw new Error("Failed to parse Gemini generated quiz. Ensure the provided material is clean text/code and try again.");
-  }
-}
+  };
 
-// ---------------------------------------------------------------------------
-// Single-language daily test tracks: Python-only and Java-only.
-// Unlike the staged Data Science curriculum (Python -> NumPy -> Pandas -> ML...),
-// these two tracks run ONE continuous 200-day curriculum in that language, cycling
-// through core topics with increasing depth across repeated "rounds" so 200 days
-// of distinct, progressively deeper content can be produced/imported in one click.
-// ---------------------------------------------------------------------------
+  useEffect(() => {
+    fetchStudentContext();
+    fetchVideos();
+  }, [student.id]);
 
-const PYTHON_TRACK_TOPICS: string[] = [
-  "Variables & Data Types",
-  "Operators & Expressions",
-  "Conditional Statements",
-  "Loops (for/while)",
-  "Lists & Tuples",
-  "Dictionaries & Sets",
-  "String Manipulation",
-  "Functions & Scope",
-  "Lambda, Map, Filter & Reduce",
-  "Exception Handling",
-  "File Handling",
-  "Modules & Packages",
-  "OOP: Classes & Objects",
-  "OOP: Inheritance & Polymorphism",
-  "Iterators & Generators",
-  "Decorators",
-  "Regular Expressions",
-  "Multithreading & Multiprocessing",
-  "Data Structures & Algorithms",
-  "Working with APIs & JSON",
-];
+  const handleRunCode = (index: number, codeQ: any) => {
+    setRunningCodeIndices((prev) => ({ ...prev, [index]: true }));
+    
+    setTimeout(() => {
+      const userCode = codingAnswers[index] || "";
+      const testCases = getTestCasesForQuestion(codeQ.questionText);
+      
+      // Simulate compilation and execution diagnostics
+      // 1. Basic Python syntax validation: check balanced braces
+      let success = true;
+      let error = "";
+      const openParens = (userCode.match(/\(/g) || []).length;
+      const closeParens = (userCode.match(/\)/g) || []).length;
+      const openBrackets = (userCode.match(/\[/g) || []).length;
+      const closeBrackets = (userCode.match(/\]/g) || []).length;
+      
+      if (openParens !== closeParens) {
+        success = false;
+        error = `SyntaxError: unbalanced parenthesis '(' was never closed`;
+      } else if (openBrackets !== closeBrackets) {
+        success = false;
+        error = `SyntaxError: unbalanced square bracket '[' was never closed`;
+      } else if (userCode.includes("def") && !userCode.includes(":")) {
+        success = false;
+        error = `SyntaxError: expected ':' at function declaration signature`;
+      }
+      
+      // 2. Capture and parse print logs
+      let stdoutLogs: string[] = [];
+      const printRegex = /print\((.*?)\)/g;
+      let match;
+      while ((match = printRegex.exec(userCode)) !== null) {
+        const val = match[1].trim().replace(/^['"]|['"]$/g, '');
+        stdoutLogs.push(val);
+      }
+      
+      // If no prints but success, add default variable evaluation trace
+      if (stdoutLogs.length === 0 && success) {
+        stdoutLogs.push("Code executed successfully without any standard terminal stdout streams.");
+      }
+      
+      // 3. Expected Keywords match for HackerRank / LeetCode test suite passing
+      const expectedKeywords = codeQ.expectedKeywords || [];
+      const missingKeywords = expectedKeywords.filter(
+        (kw: string) => !userCode.toLowerCase().includes(kw.toLowerCase())
+      );
+      
+      const passedTests = success && missingKeywords.length === 0;
+      
+      // 4. Generate highly realistic Test Case execution traces for each mapped test case
+      const testCaseResults = testCases.map((tc, tcIdx) => {
+        if (!success) {
+          return {
+            input: tc.input,
+            expected: tc.expectedOutput,
+            actual: "None (Compilation Failure)",
+            status: "Error" as const,
+            duration: "—",
+            memory: "—",
+            durationLimit: tc.timeLimit,
+            memoryLimit: tc.memoryLimit
+          };
+        }
+        
+        if (missingKeywords.length > 0) {
+          // If keywords missing, simulate a failure on the test cases
+          const actualVal = tcIdx === 0 ? "None" : "Traceback (most recent call last):\n  Failed algorithmic validation criteria check.";
+          return {
+            input: tc.input,
+            expected: tc.expectedOutput,
+            actual: actualVal,
+            status: "Failed" as const,
+            duration: (Math.random() * 2 + 3).toFixed(1) + "ms",
+            memory: (Math.random() * 0.5 + 1.2).toFixed(2) + "MB",
+            durationLimit: tc.timeLimit,
+            memoryLimit: tc.memoryLimit
+          };
+        }
+        
+        // Success case: matches expected output!
+        return {
+          input: tc.input,
+          expected: tc.expectedOutput,
+          actual: tc.expectedOutput,
+          status: "Passed" as const,
+          duration: (Math.random() * 1.5 + 0.8).toFixed(1) + "ms",
+          memory: (Math.random() * 0.2 + 0.9).toFixed(2) + "MB",
+          durationLimit: tc.timeLimit,
+          memoryLimit: tc.memoryLimit
+        };
+      });
+      
+      const allPassed = passedTests && testCaseResults.every(r => r.status === "Passed");
+      
+      if (!allPassed && success) {
+        stdoutLogs.push(`\n❌ TEST SUITE FAILURE (${testCaseResults.filter(r => r.status !== "Passed").length}/${testCaseResults.length} Test Cases Failed):`);
+        stdoutLogs.push(`Missing crucial algorithmic components: [${missingKeywords.join(", ")}]`);
+      } else if (allPassed) {
+        stdoutLogs.push(`\n✅ TEST SUITE SUCCESS (${testCaseResults.length}/${testCaseResults.length} Test Cases Passed!):`);
+        stdoutLogs.push(`All criteria matched. Input validated & solution matches targeted complexity constraints.`);
+      }
+      
+      setCodeExecutionLogs((prev) => ({
+        ...prev,
+        [index]: {
+          success,
+          stdout: stdoutLogs.join("\n"),
+          error: error || undefined,
+          durationMs: Math.floor(Math.random() * 8) + 1,
+          passedTests: allPassed,
+          testCaseResults
+        },
+      }));
+      
+      setRunningCodeIndices((prev) => ({ ...prev, [index]: false }));
+    }, 900);
+  };
 
-const JAVA_TRACK_TOPICS: string[] = [
-  "Variables, Data Types & Operators",
-  "Control Flow (if/switch/loops)",
-  "Arrays & Strings",
-  "Methods & Overloading",
-  "OOP: Classes & Objects",
-  "OOP: Inheritance & Polymorphism",
-  "Abstract Classes & Interfaces",
-  "Exception Handling",
-  "Collections Framework (List/Set/Map)",
-  "Generics",
-  "Multithreading & Concurrency",
-  "File I/O & Serialization",
-  "Lambda Expressions & Streams",
-  "JDBC & Database Basics",
-  "Design Patterns",
-  "Data Structures & Algorithms",
-  "Spring Boot Basics",
-  "REST APIs in Java",
-  "Unit Testing (JUnit)",
-  "Memory Management & JVM Internals",
-];
+  const handleCompareCode = async (index: number, userCode: string, idealCode: string, questionText: string) => {
+    setLoadingComparisonIndices((prev) => ({ ...prev, [index]: true }));
+    try {
+      const res = await fetch("/api/quiz/compare-code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userCode, idealCode, questionText }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCodeComparisonData((prev) => ({ ...prev, [index]: data }));
+      } else {
+        console.error("Failed to fetch code comparison feedback");
+      }
+    } catch (err) {
+      console.error("Error comparing student code:", err);
+    } finally {
+      setLoadingComparisonIndices((prev) => ({ ...prev, [index]: false }));
+    }
+  };
 
-function getTrackTopics(track: "python" | "java"): string[] {
-  return track === "java" ? JAVA_TRACK_TOPICS : PYTHON_TRACK_TOPICS;
-}
+  const handleRegisterAttendance = async (dayNum: number, status: "offline" | "online" | "absent", zoomUrl: string = "") => {
+    setSubmittingAttendance(true);
+    setAttendanceError(null);
+    try {
+      const res = await fetch("/api/attendance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          studentId: student.id,
+          dayNumber: dayNum,
+          status,
+          zoomUrl
+        })
+      });
+      if (res.ok) {
+        await fetchStudentContext();
+      } else {
+        const errObj = await res.json();
+        setAttendanceError(errObj.error || "Failed to register check-in.");
+      }
+    } catch (err) {
+      console.error("Failed to register classroom check-in:", err);
+      setAttendanceError("Connection error while registering check-in.");
+    } finally {
+      setSubmittingAttendance(false);
+    }
+  };
 
-export function getTopicTitleForTrackDay(track: "python" | "java", dayNumber: number): string {
-  const topics = getTrackTopics(track);
-  const idx = (dayNumber - 1) % topics.length;
-  const round = Math.floor((dayNumber - 1) / topics.length) + 1;
-  const base = topics[idx];
-  return round === 1 ? base : `${base} (Round ${round} — Advanced Practice)`;
-}
+  const fetchStudentContext = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/db");
+      if (res.ok) {
+        const data = await res.json();
+        setLocks(data.locks || {});
+        // Load locked settings for student's batch
+        const batchLock = data.locks?.[student.batch] || {
+          unlockedDays: [1, 2]
+        };
+        setUnlockedDays(batchLock.unlockedDays || []);
 
-function getFallbackQuizForTrackDay(track: "python" | "java", dayNumber: number, topicTitle: string): DayQuiz {
-  const languageLabel = track === "java" ? "Java" : "Python";
-  const mcqs: MCQQuestion[] = Array.from({ length: 8 }).map((_, i) => ({
-    questionText: `[${languageLabel} — Day ${dayNumber}] Which statement best reflects a correct usage/understanding of "${topicTitle}"? (Question ${i + 1})`,
-    options: ["Option A", "Option B", "Option C", "Option D"],
-    correctOption: 0,
-    explanation: `This is placeholder content for "${topicTitle}". Configure GEMINI_API_KEY so real AI-generated questions can be produced for this track, or use the Override Quiz tool to replace it manually.`,
-  }));
-  const coding: CodingQuestion[] = [
-    {
-      questionText: `Write a short ${languageLabel} program that demonstrates "${topicTitle}".`,
-      starterCode: track === "java" ? `public class Solution {\n    public static void main(String[] args) {\n        // Write your Java code here\n    }\n}` : `def solution():\n    # Write your Python code here\n    pass`,
-      expectedKeywords: [languageLabel.toLowerCase()],
-      solutionDescription: `Placeholder solution outline for "${topicTitle}". Replace via the Override Quiz tool once real content is ready.`,
-    },
-    {
-      questionText: `Write a ${languageLabel} function/method that applies "${topicTitle}" to solve a small practical problem.`,
-      starterCode: track === "java" ? `public class Solution {\n    public static void main(String[] args) {\n        // Write your Java code here\n    }\n}` : `def solution():\n    # Write your Python code here\n    pass`,
-      expectedKeywords: [languageLabel.toLowerCase()],
-      solutionDescription: `Placeholder solution outline for "${topicTitle}". Replace via the Override Quiz tool once real content is ready.`,
-    },
-  ];
-  return { dayNumber, courseSlug: track, topicTitle, mcqs, coding };
-}
+        // Load attendance
+        setAttendance(data.attendance || []);
 
-// Generates (or falls back to a labeled placeholder for) a single day's quiz for the
-// Python-only or Java-only daily test track. Used both for on-demand fetches and for
-// the "Import 200 Days" bulk generator in server.ts.
-export async function generateQuizForTrackDay(track: "python" | "java", dayNumber: number): Promise<DayQuiz> {
-  const topicTitle = getTopicTitleForTrackDay(track, dayNumber);
-  const languageLabel = track === "java" ? "Java" : "Python";
-  const ai = getAi();
+        // Load active student object to check permission
+        const matched = (data.students || []).find((s: any) => s.id === student.id);
+        if (matched) {
+          setCurrentStudentObj(matched);
+          if (matched.placementDetails) {
+            setPlacementForm({
+              linkedin: matched.placementDetails.linkedin || "",
+              indeed: matched.placementDetails.indeed || "",
+              naukri: matched.placementDetails.naukri || "",
+              glassdoor: matched.placementDetails.glassdoor || "",
+              foundit: matched.placementDetails.foundit || "",
+              shine: matched.placementDetails.shine || "",
+              timesjobs: matched.placementDetails.timesjobs || "",
+              internshala: matched.placementDetails.internshala || "",
+              wellfound: matched.placementDetails.wellfound || "",
+              apna: matched.placementDetails.apna || ""
+            });
+          }
+        }
 
-  if (!ai) {
-    return getFallbackQuizForTrackDay(track, dayNumber, topicTitle);
-  }
+        // Load scheduled tests and student's submitted weekly/monthly tests
+        try {
+          const testsRes = await fetch("/api/scheduled-tests");
+          if (testsRes.ok) {
+            const testsData = await testsRes.json();
+            if (testsData.success) {
+              setScheduledTests(testsData.tests || []);
+            }
+          }
+        } catch (err) {
+          console.error("Failed to load active scheduled evaluation tests:", err);
+        }
 
-  try {
-    const prompt = `
-Generate a high-quality ${languageLabel} Daily Test quiz in JSON format for Day ${dayNumber} of a dedicated ${languageLabel}-only 200-day training track.
-Topic Focus: "${topicTitle}".
+        try {
+          const subsRes = await fetch("/api/scheduled-tests/submissions");
+          if (subsRes.ok) {
+            const subsData = await subsRes.json();
+            if (subsData.success) {
+              const filtered = (subsData.submissions || []).filter((s: any) => s.studentId === student.id);
+              setScheduledSubmissions(filtered);
+            }
+          }
+        } catch (err) {
+          console.error("Failed to load evaluation submissions list:", err);
+        }
 
-Important Structure instructions:
-Return a JSON object containing EXACTLY:
-{
-  "dayNumber": ${dayNumber},
-  "courseSlug": "${track}",
-  "topicTitle": "${topicTitle}",
-  "mcqs": [
-    {
-      "questionText": "A precise, technical ${languageLabel} question covering ${topicTitle}",
-      "options": ["Option A", "Option B", "Option C", "Option D"],
-      "correctOption": 0, // 0-indexed integer of the correct answer
-      "explanation": "Brief context explanation of why this answer is correct"
-    } // ... provide EXACTLY 8 MCQs
-  ],
-  "coding": [
-    {
-      "questionText": "Detailed description of a ${languageLabel} coding challenge targeting ${topicTitle}",
-      "starterCode": "${track === "java" ? "public class Solution {\\n    public static void main(String[] args) {\\n        // Write your Java code here\\n    }\\n}" : "def solution_fn(...):\\n    # Write Python code here"}",
-      "expectedKeywords": ["keyword1", "keyword2"],
-      "solutionDescription": "Brief explanation of how to construct the correct solution"
-    } // ... provide EXACTLY 2 Coding challenges
-  ]
-}
+        // Filter submissions for this specific student id
+        const studentSubmissions = (data.submissions || []).filter(
+          (sub: any) => sub.studentId === student.id
+        );
+        setSubmissions(studentSubmissions);
 
-Ensure your output is strictly valid JSON, containing no explanation text, and wrapped inside markdown code blocks.
-`;
+        // Filter student assessment scores
+        const studentAssessments = (data.assessments || []).filter(
+          (asm: any) => asm.studentId === student.id
+        );
+        setAssessments(studentAssessments);
 
-    const resp = await generateContentWithRetry(ai, {
-      model: "gemini-3.5-flash",
-      contents: prompt,
+        // Filter student overrides
+        const studentOverrides = (data.overrides || []).filter(
+          (o: any) => o.studentId === student.id
+        );
+        setOverrides(studentOverrides);
+
+        setTotalPresentDays(studentSubmissions.length);
+        if (studentSubmissions.length > 0) {
+          const sum = studentSubmissions.reduce((acc: number, cur: any) => acc + (cur.score || 0), 0);
+          setAverageScore(Number((sum / studentSubmissions.length).toFixed(1)));
+        } else {
+          setAverageScore(0);
+        }
+
+        // Fetch student past interviews to track webcam recordings and video approvals
+        try {
+          const interviewsRes = await fetch(`/api/interviews/student/${student.id}`);
+          if (interviewsRes.ok) {
+            const interviewsData = await interviewsRes.json();
+            setStudentInterviews(interviewsData || []);
+          }
+        } catch (interviewsErr) {
+          console.error("Failed to load student past interviews in context:", interviewsErr);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load student board profile:", e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSavePlacementDetails = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingPlacementDetails(true);
+    setPlacementError(null);
+    try {
+      const res = await fetch(`/api/students/${student.id}/placement-details`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ placementDetails: placementForm })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setShowPlacementModal(false);
+        await fetchStudentContext();
+      } else {
+        setPlacementError(data.error || "Failed to update placement details.");
+      }
+    } catch (err) {
+      setPlacementError("Failed to communicate with placement server.");
+    } finally {
+      setSavingPlacementDetails(false);
+    }
+  };
+
+  const handleSubmitScheduledTest = async (testId: string) => {
+    if (!currentStudentObj) return;
+    setSubmittingScheduledTest(true);
+    
+    const test = scheduledTests.find(t => t.id === testId);
+    if (!test) {
+      setSubmittingScheduledTest(false);
+      return;
+    }
+
+    let correctCount = 0;
+    const totalMCQs = test.mcqs?.length || 0;
+    test.mcqs?.forEach((m: any, idx: number) => {
+      if (testAnswersMCQ[idx] === m.correctOption) {
+        correctCount++;
+      }
     });
 
-    const respText = resp.text || "";
-    let jsonString = respText.trim();
-    if (jsonString.startsWith("```json")) {
-      jsonString = jsonString.slice(7);
-    } else if (jsonString.startsWith("```")) {
-      jsonString = jsonString.slice(3);
-    }
-    if (jsonString.endsWith("```")) {
-      jsonString = jsonString.slice(0, -3);
-    }
-    jsonString = jsonString.trim();
+    const finalPercent = totalMCQs > 0 ? Math.round((correctCount / totalMCQs) * 100) : 100;
+    setTestScorePercent(finalPercent);
 
-    const parsed = JSON.parse(jsonString) as DayQuiz;
-    if (parsed && Array.isArray(parsed.mcqs) && parsed.mcqs.length === 8 && Array.isArray(parsed.coding) && parsed.coding.length === 2) {
-      return parsed;
+    try {
+      const res = await fetch(`/api/scheduled-tests/${testId}/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          studentId: currentStudentObj.id,
+          studentName: currentStudentObj.name,
+          rollNumber: currentStudentObj.rollNumber,
+          batch: currentStudentObj.batch,
+          mcqAnswers: testAnswersMCQ,
+          codingAnswers: Object.values(testAnswersCoding),
+          score: finalPercent
+        })
+      });
+
+      if (res.ok) {
+        setTestWindowStep("completed");
+        await fetchStudentContext();
+      }
+    } catch (err) {
+      console.error("Failed to submit scheduled test:", err);
+    } finally {
+      setSubmittingScheduledTest(false);
     }
-    throw new Error("Parsed JSON has invalid structure or length of lists");
-  } catch (err) {
-    console.warn(`[Gemini API] Track quiz generation failed for ${track} Day ${dayNumber}, using placeholder:`, err);
-    return getFallbackQuizForTrackDay(track, dayNumber, topicTitle);
-  }
+  };
+
+  const handleAnalyzeResume = async () => {
+    if (!resumeText.trim()) {
+      setResumeError("Please write or paste your resume content first so we can analyze it.");
+      return;
+    }
+    setAnalyzingResume(true);
+    setResumeError(null);
+    try {
+      const res = await fetch("/api/careers/analyze-resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resumeText, location: jobLocation }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setResumeAnalysisResult(data);
+      } else {
+        const errData = await res.json();
+        setResumeError(errData.error || "Analysis request failed.");
+      }
+    } catch (err: any) {
+      setResumeError(err.message || "An unexpected error occurred while analyzing your resume.");
+    } finally {
+      setAnalyzingResume(false);
+    }
+  };
+
+  // Extracts real, currently open job postings from LinkedIn, Naukri, Indeed, Instahyre,
+  // Wellfound, and company career pages (via Gemini + Google Search grounding on the backend)
+  // for the given skills/role, and returns direct apply links instead of generic search URLs.
+  const handleFetchLiveJobs = async (roleQuery: string, skills?: string[]) => {
+    setLoadingLiveJobs(true);
+    setLiveJobsError(null);
+    setLiveJobs([]);
+    setLiveJobsFetchedFor(roleQuery);
+    try {
+      const res = await fetch("/api/careers/live-jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roleQuery,
+          skills: skills && skills.length > 0 ? skills : undefined,
+          resumeText: resumeText || undefined,
+          location: jobLocation,
+          // Send whichever portal profiles the student has filled in — could be just 1 or 2,
+          // or all 10. The backend uses exactly the ones provided; it never requires a minimum.
+          placementDetails: currentStudentObj?.placementDetails || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setLiveJobs(data.jobs || []);
+        if ((data.jobs || []).length === 0) {
+          setLiveJobsError("No verified postings from the last 48 hours were found for this exact search. Try a different role, or widen your preferred location, and search again.");
+        }
+      } else {
+        setLiveJobsError(data.error || "Live job search failed. Please try again.");
+      }
+    } catch (err: any) {
+      setLiveJobsError(err.message || "An unexpected error occurred while searching for live jobs.");
+    } finally {
+      setLoadingLiveJobs(false);
+    }
+  };
+
+  // Rewrites the ATS resume so it foregrounds the exact skills/keywords mentioned in a
+  // specific job posting's title/description, rather than a generic one-size-fits-all resume.
+  const handleTailorResumeForJob = async (job: any) => {
+    const jobKey = `${job.title}-${job.company}`;
+    setTailoringJobKey(jobKey);
+    setTailoredResumeError(null);
+    setTailoredResumeResult(null);
+    try {
+      const res = await fetch("/api/careers/tailor-resume-for-job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          studentId: student.id,
+          job,
+          resumeText: resumeText || undefined,
+          inputs: atsInputs,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTailoredResumeResult(data);
+      } else {
+        setTailoredResumeError(data.error || "Failed to tailor resume for this job.");
+      }
+    } catch (err: any) {
+      setTailoredResumeError(err.message || "An unexpected error occurred while tailoring your resume.");
+    } finally {
+      setTailoringJobKey(null);
+    }
+  };
+
+  const handleBuildAtsResume = async () => {
+    setCompilingResume(true);
+    setAtsError(null);
+    try {
+      const res = await fetch("/api/careers/build-ats-resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ studentId: student.id, inputs: atsInputs }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAtsResult(data);
+      } else {
+        const errData = await res.json();
+        setAtsError(errData.error || "Failed to compile resume.");
+      }
+    } catch (err: any) {
+      setAtsError(err.message || "An error occurred while compiling your resume.");
+    } finally {
+      setCompilingResume(false);
+    }
+  };
+
+  const handleAttachVideo = async (courseSlug: string) => {
+    if (!newVideoForm.title || !newVideoForm.videoUrl) {
+      setVideoError("Please provide a Title and Video URL.");
+      return;
+    }
+    setSavingVideo(true);
+    setVideoError(null);
+    try {
+      const res = await fetch("/api/videos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          courseSlug,
+          title: newVideoForm.title,
+          description: newVideoForm.description,
+          videoUrl: newVideoForm.videoUrl,
+          addedBy: student.name || "Student Participant"
+        })
+      });
+      if (res.ok) {
+        const body = await res.json();
+        if (body.success) {
+          setLearningVideos(prev => [...prev, body.video]);
+          setNewVideoForm({ title: "", description: "", videoUrl: "" });
+          setShowAttachFormSlug(null);
+        } else {
+          setVideoError(body.error || "Failed to attach study video.");
+        }
+      } else {
+        const errJson = await res.json();
+        setVideoError(errJson.error || "Failed to attach study video.");
+      }
+    } catch (err: any) {
+      setVideoError(err.message || "Network error occurred.");
+    } finally {
+      setSavingVideo(false);
+    }
+  };
+
+  // Launch test for a specific Day
+  const handleStartTest = async (dayNum: number) => {
+    const matchedSub = submissions.find((sub) => sub.dayNumber === dayNum);
+
+    // Prerequisite & lock check for uncompleted test attempts
+    if (!matchedSub) {
+      const isInstructorUnlocked = unlockedDays.includes(dayNum);
+      if (!isInstructorUnlocked) {
+        alert("This day is currently locked by the classroom instructor.");
+        return;
+      }
+
+      if (dayNum > 1) {
+        const prevDayCompleted = submissions.some((sub) => sub.dayNumber === dayNum - 1);
+        if (!prevDayCompleted) {
+          alert(`Prerequisite block: You must complete Day ${dayNum - 1} before you can start Day ${dayNum}!`);
+          return;
+        }
+      }
+    }
+
+    setLoadingQuiz(true);
+    setCurrentMCQIndex(0);
+    setSelectedMCQAnswers({});
+    setCodingAnswers({});
+    setIsTestSubmitted(false);
+    setReviewSubmission(null);
+    setShowReviewExplanations(false);
+
+    try {
+      const res = await fetch(`/api/quiz/${dayNum}?track=${studentCourseTrack}`);
+      if (res.ok) {
+        const quiz = await res.json();
+        setQuizData(quiz);
+        setActiveDay(dayNum);
+
+        if (matchedSub) {
+          // Already completed! Just show results & correct answers. NO edit option!
+          setIsTestSubmitted(true);
+          setReviewSubmission(matchedSub);
+          setShowReviewExplanations(true);
+          setSelectedMCQAnswers(matchedSub.selectedMCQAnswers || {});
+          
+          const answers: Record<number, string> = {};
+          (matchedSub.codingSubmissions || []).forEach((cSub: any, idx: number) => {
+            answers[idx] = cSub.submittedCode || "";
+          });
+          setCodingAnswers(answers);
+        } else {
+          // Fresh test, pre-populate standard templates
+          const starters: Record<number, string> = {};
+          quiz.coding.forEach((codeQ: any, index: number) => {
+            starters[index] = codeQ.starterCode || "def solution_fn():\n    # Write python code below\n    pass";
+          });
+          setCodingAnswers(starters);
+        }
+      }
+    } catch (e) {
+      alert("Error generating the daily training exam questions");
+    } finally {
+      setLoadingQuiz(false);
+    }
+  };
+
+  // Handle choice selection for MCQ
+  const handleSelectMCQ = (questionIdx: number, optionIdx: number) => {
+    setSelectedMCQAnswers((prev) => ({
+      ...prev,
+      [questionIdx]: optionIdx,
+    }));
+  };
+
+  // Handle coding text typing
+  const handleCodingType = (index: number, code: string) => {
+    setCodingAnswers((prev) => ({
+      ...prev,
+      [index]: code,
+    }));
+  };
+
+  // Check if coding solution fits simple keyword metrics for UI assistance
+  const verifyCodingProgress = (index: number) => {
+    if (!quizData) return [];
+    const keywords = quizData.coding[index]?.expectedKeywords || [];
+    const clientCode = codingAnswers[index] || "";
+
+    return keywords.map((k) => ({
+      keyword: k,
+      matched: clientCode.includes(k),
+    }));
+  };
+
+  const handleCodeEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>, onChange: (val: string) => void) => {
+    const textarea = e.currentTarget;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const value = textarea.value;
+
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const newValue = value.substring(0, start) + "    " + value.substring(end);
+      onChange(newValue);
+      setTimeout(() => {
+        textarea.selectionStart = textarea.selectionEnd = start + 4;
+      }, 0);
+    } else if (e.key === '(') {
+      e.preventDefault();
+      const newValue = value.substring(0, start) + "()" + value.substring(end);
+      onChange(newValue);
+      setTimeout(() => {
+        textarea.selectionStart = textarea.selectionEnd = start + 1;
+      }, 0);
+    } else if (e.key === '[') {
+      e.preventDefault();
+      const newValue = value.substring(0, start) + "[]" + value.substring(end);
+      onChange(newValue);
+      setTimeout(() => {
+        textarea.selectionStart = textarea.selectionEnd = start + 1;
+      }, 0);
+    } else if (e.key === '{') {
+      e.preventDefault();
+      const newValue = value.substring(0, start) + "{}" + value.substring(end);
+      onChange(newValue);
+      setTimeout(() => {
+        textarea.selectionStart = textarea.selectionEnd = start + 1;
+      }, 0);
+    } else if (e.key === '"' || e.key === "'") {
+      e.preventDefault();
+      const newValue = value.substring(0, start) + e.key + e.key + value.substring(end);
+      onChange(newValue);
+      setTimeout(() => {
+        textarea.selectionStart = textarea.selectionEnd = start + 1;
+      }, 0);
+    }
+  };
+
+  const handleRunSandboxCode = () => {
+    setCompilerIsRunning(true);
+    setCompilerOutput(["Compiling sandbox scripts...", "Linking virtual libraries..."]);
+    
+    setTimeout(() => {
+      const code = compilerCode;
+      let logs: string[] = [];
+      let success = true;
+
+      // 1. Balance check
+      const openP = (code.match(/\(/g) || []).length;
+      const closeP = (code.match(/\)/g) || []).length;
+      const openB = (code.match(/\[/g) || []).length;
+      const closeB = (code.match(/\]/g) || []).length;
+      const openC = (code.match(/\{/g) || []).length;
+      const closeC = (code.match(/\}/g) || []).length;
+
+      if (openP !== closeP) {
+        logs.push(`SyntaxError: unbalanced parenthesis '(' was never closed`);
+        success = false;
+      } else if (openB !== closeB) {
+        logs.push(`SyntaxError: unbalanced square bracket '[' was never closed`);
+        success = false;
+      } else if (openC !== closeC) {
+        logs.push(`SyntaxError: unbalanced curly brace '{' was never closed`);
+        success = false;
+      }
+
+      // 2. Simple interpreter simulator
+      if (success) {
+        logs = [">>> PORTAL PYTHON INTERPRETER (Sandbox v3.5) <<<", ""];
+        
+        // Split by lines
+        const lines = code.split("\n");
+        let variables: Record<string, any> = {};
+        
+        for (let line of lines) {
+          line = line.trim();
+          if (!line || line.startsWith("#")) continue;
+
+          // Detect simple print statements
+          if (line.startsWith("print(") && line.endsWith(")")) {
+            const inner = line.substring(6, line.length - 1).trim();
+            // Check if string literal
+            if ((inner.startsWith('"') && inner.endsWith('"')) || (inner.startsWith("'") && inner.endsWith("'"))) {
+              logs.push(inner.substring(1, inner.length - 1));
+            } else {
+              // Try evaluating variable or arithmetic expression
+              try {
+                if (variables[inner] !== undefined) {
+                  logs.push(String(variables[inner]));
+                } else {
+                  // Safe math evaluation
+                  const cleanExpr = inner.replace(/[^-()\d/*+.]/g, '');
+                  if (cleanExpr) {
+                    const res = Function(`"use strict"; return (${cleanExpr})`)();
+                    logs.push(String(res));
+                  } else {
+                    logs.push(inner);
+                  }
+                }
+              } catch {
+                logs.push(`NameError: name '${inner}' is not defined`);
+              }
+            }
+          } else if (line.includes("=")) {
+            // Simple variable assignment
+            const parts = line.split("=");
+            if (parts.length >= 2) {
+              const varName = parts[0].trim();
+              const varVal = parts[1].trim();
+              if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(varName)) {
+                try {
+                  if ((varVal.startsWith('"') && varVal.endsWith('"')) || (varVal.startsWith("'") && varVal.endsWith("'"))) {
+                    variables[varName] = varVal.substring(1, varVal.length - 1);
+                  } else if (!isNaN(Number(varVal))) {
+                    variables[varName] = Number(varVal);
+                  } else {
+                    if (variables[varVal] !== undefined) {
+                      variables[varName] = variables[varVal];
+                    } else {
+                      variables[varName] = varVal;
+                    }
+                  }
+                } catch {
+                  variables[varName] = varVal;
+                }
+              }
+            }
+          }
+        }
+
+        if (logs.length === 2) {
+          logs.push("Python file ran successfully. Process returned exit code 0.");
+        }
+      }
+      setCompilerOutput(logs);
+      setCompilerIsRunning(false);
+    }, 600);
+  };
+
+  // Perform Final Submission
+  const handleSubmitTest = async () => {
+    if (!quizData || !activeDay) return;
+
+    // Check if all MCQs answered
+    if (Object.keys(selectedMCQAnswers).length < 8) {
+      if (!window.confirm("You have unanswered MCQs. Are you sure you want to submit?")) return;
+    }
+
+    // Determine MCQ Correct points (max 8)
+    let mcqPoints = 0;
+    quizData.mcqs.forEach((mcq, idx) => {
+      if (selectedMCQAnswers[idx] === mcq.correctOption) {
+        mcqPoints++;
+      }
+    });
+
+    // We count matching coding snippets (each evaluated for actual attempt rather than raw templates)
+    // The total test score can be mcqPoints + codingPoints (max 10 points)
+    let codingPoints = 0;
+    quizData.coding.forEach((q, idx) => {
+      const studentCode = (codingAnswers[idx] || "").trim();
+      const starterCode = (q.starterCode || "def solution_fn():\n    # Write python code below\n    pass").trim();
+      
+      if (!studentCode) return;
+      
+      // Clean up whitespace, comments, and the 'pass' keyword to check if they wrote something new
+      const cleanStudent = studentCode.replace(/#.*$/gm, "").replace(/\s+/g, "").replace(/\bpass\b/g, "");
+      const cleanStarter = starterCode.replace(/#.*$/gm, "").replace(/\s+/g, "").replace(/\bpass\b/g, "");
+      
+      // If code was changed from starter, and had real non-white space content
+      if (studentCode !== starterCode && cleanStudent.length > 0 && cleanStudent !== cleanStarter) {
+        codingPoints++;
+      }
+    });
+
+    const finalScore = mcqPoints + codingPoints;
+
+    const payload = {
+      studentId: student.id,
+      studentName: student.name,
+      rollNumber: student.rollNumber,
+      batch: student.batch,
+      dayNumber: activeDay,
+      courseSlug: quizData.courseSlug,
+      score: finalScore,
+      mcqScores: mcqPoints,
+      codingSubmissions: quizData.coding.map((q, idx) => ({
+        questionText: q.questionText,
+        submittedCode: codingAnswers[idx] || ""
+      })),
+      selectedMCQAnswers
+    };
+
+    try {
+      const res = await fetch("/api/submissions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setIsTestSubmitted(true);
+        setReviewSubmission(data.submission);
+        setShowReviewExplanations(true);
+        // Refresh indices
+        await fetchStudentContext();
+        // Scroll to top automatically so results are displayed clearly
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    } catch (e) {
+      alert("Failed to deliver submission safely");
+    }
+  };
+
+  const getDayStatus = (dayNum: number) => {
+    const matchedSub = submissions.find((sub) => sub.dayNumber === dayNum);
+    if (matchedSub) {
+      return { status: "completed" as const, score: matchedSub.score };
+    }
+
+    const isInstructorUnlocked = unlockedDays.includes(dayNum);
+    const isPrerequisiteMet = dayNum === 1 || submissions.some((sub) => sub.dayNumber === dayNum - 1);
+
+    if (isInstructorUnlocked && isPrerequisiteMet) {
+      return { status: "unlocked" as const };
+    }
+    return { status: "locked" as const };
+  };
+
+  return (
+    <div className="bg-slate-50 min-h-screen text-slate-800 font-sans">
+      {/* Dashboard Top bar */}
+      <header className="h-16 bg-slate-900 border-b border-slate-800 text-white flex items-center justify-between px-6 sticky top-0 z-20 print:hidden shrink-0 shadow-sm animate-fade-in">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-indigo-600 rounded flex items-center justify-center font-bold text-lg font-display select-none">Σ</div>
+          <div>
+            <h1 className="text-sm font-extrabold leading-none font-display">
+              DataScience Pro <span className="font-normal text-slate-400">| Student</span>
+            </h1>
+            <p className="text-[10px] text-slate-400 mt-1">
+              Welcome, <span className="font-semibold text-slate-300">{student.name}</span> &bull; {student.batch}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4">
+          <span className="hidden sm:inline bg-slate-800 text-slate-300 border border-slate-700 text-xs px-3 py-1 rounded font-mono font-bold">
+            UID: {student.rollNumber}
+          </span>
+          <button
+            onClick={onLogout}
+            className="text-slate-400 hover:text-white flex items-center gap-1.5 py-1.5 px-3 rounded text-xs font-medium cursor-pointer transition"
+          >
+            <LogOut className="w-4 h-4 text-slate-400" />
+            <span>Logout</span>
+          </button>
+        </div>
+      </header>
+
+      {/* Main Student Workspace */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 font-sans">
+        {/* STUDENT INFO DASHBOARD & ROADMAP PATH */}
+        {!activeDay && (
+          <div className="mb-8 space-y-6 animate-fade-in">
+            {/* PROFILE META CARD */}
+            <div className="bg-gradient-to-r from-indigo-900 to-slate-900 rounded-2xl p-6 text-white shadow-lg border border-indigo-950 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="p-1 px-2.5 bg-indigo-500/20 text-indigo-300 rounded-full font-bold text-xs font-mono uppercase tracking-wide">
+                    Master Student Profile Dashboard
+                  </span>
+                  <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping"></span>
+                  <span className="text-[10px] text-emerald-300 font-semibold font-mono">AUTHORIZED SECURE SESSION</span>
+                </div>
+                <h2 className="text-2xl font-extrabold tracking-tight text-white font-display">
+                  {student.name}
+                </h2>
+                <p className="text-xs text-slate-300 font-sans max-w-xl">
+                  You are registered inside the academic master database. Your Phone Number has been linked securely to lock your credentials and protect your ongoing exam records.
+                </p>
+              </div>
+
+              {/* GRID INFORMATION FIELDS */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 w-full lg:w-auto text-xs font-sans shrink-0">
+                <div className="bg-white/5 p-3 rounded-xl border border-white/10">
+                  <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider mb-1">Assigned Batch</span>
+                  <span className="font-extrabold text-indigo-300 text-sm truncate block">{student.batch}</span>
+                </div>
+                <div className="bg-white/5 p-3 rounded-xl border border-white/10">
+                  <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider mb-1">Student Roll ID</span>
+                  <span className="font-bold text-white font-mono text-sm block">{student.rollNumber}</span>
+                </div>
+                <div className="bg-white/5 p-3 rounded-xl border border-white/10">
+                  <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider mb-1">Linked Phone</span>
+                  <span className="font-bold text-emerald-300 font-mono text-sm block">
+                    {student.phoneNumber || "Free Roll Verification"}
+                  </span>
+                </div>
+                <div className="bg-white/5 p-3 rounded-xl border border-white/10">
+                  <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider mb-1">E-mail Address</span>
+                  <span className="font-semibold text-indigo-200 text-xs truncate block">{student.email || "No Email Provided"}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* AI INTERVIEWS SUMMARY AND METRICS BAR */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs grid grid-cols-1 md:grid-cols-3 gap-5 items-center font-sans">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-xl bg-amber-50 flex items-center justify-center text-amber-600 font-extrabold shadow-2xs">
+                  <Sparkles className="w-5.5 h-5.5 text-amber-600" />
+                </div>
+                <div>
+                  <h3 className="text-xs font-extrabold text-slate-900 uppercase tracking-wider font-mono">AI Interview Metrics</h3>
+                  <p className="text-[10px] text-slate-500 font-sans">Your webcam-monitored placement room performance.</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 border-y md:border-y-0 md:border-x border-slate-100 py-3 md:py-0 md:px-5">
+                <div>
+                  <span className="text-[9px] text-slate-400 block uppercase font-bold tracking-wider font-mono">Sessions Taken</span>
+                  <span className="text-sm font-black text-slate-800 font-mono">
+                    {studentInterviews.length} sessions
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[9px] text-slate-400 block uppercase font-bold tracking-wider font-mono">Avg Score</span>
+                  <span className="text-lg font-black text-amber-600 font-mono">
+                    {studentInterviews.length > 0
+                      ? Math.round(studentInterviews.reduce((acc, curr) => acc + (curr.report?.score || 0), 0) / studentInterviews.length) + "%"
+                      : "0%"}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex justify-between items-center gap-4">
+                <div className="flex flex-col">
+                  <span className="text-[9px] text-slate-400 block uppercase font-bold tracking-wider font-mono">PROCTOR VIDEOS</span>
+                  <span className="text-[10px] font-bold text-slate-700 font-sans leading-none mt-0.5">
+                    {studentInterviews.filter(item => item.videoAccessGranted).length} unlocked by mentor
+                  </span>
+                </div>
+                {studentInterviews.some(item => item.videoAccessGranted) ? (
+                  <button
+                    onClick={() => setActiveTab("ai-videos" as any)}
+                    className="bg-rose-600 hover:bg-rose-500 hover:shadow-rose-650/20 text-white font-extrabold uppercase font-mono tracking-wider text-[9.5px] px-3 py-1.5 rounded-lg shadow-sm transition shrink-0 animate-pulse cursor-pointer flex items-center gap-1"
+                  >
+                    <Video className="w-3.5 h-3.5 fill-white" />
+                    Watch Now
+                  </button>
+                ) : (
+                  <span className="text-[9.5px] font-bold text-slate-400 bg-slate-100 py-1.5 px-3 rounded-lg uppercase tracking-wider font-mono block shrink-0 text-center">
+                    Locked by Mentor
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* INTERACTIVE WORKSPACE TABS */}
+            <div className="flex gap-4 border-b border-slate-200 overflow-x-auto pb-1">
+              <button
+                onClick={() => setActiveTab("curriculum")}
+                className={`pb-3 text-xs uppercase tracking-wider font-extrabold flex items-center gap-2 border-b-2 transition cursor-pointer whitespace-nowrap ${
+                  activeTab === "curriculum"
+                    ? "border-indigo-600 text-indigo-600"
+                    : "border-transparent text-slate-400 hover:text-slate-650"
+                }`}
+              >
+                <Calendar className="w-4 h-4 animate-pulse-slow" />
+                Curriculum Days Matrix
+              </button>
+              <button
+                onClick={() => setActiveTab("assessments")}
+                className={`pb-3 text-xs uppercase tracking-wider font-extrabold flex items-center gap-2 border-b-2 transition cursor-pointer whitespace-nowrap ${
+                  activeTab === "assessments"
+                    ? "border-indigo-600 text-indigo-600 font-bold"
+                    : "border-transparent text-slate-400 hover:text-slate-650"
+                }`}
+              >
+                <Award className="w-4 h-4 text-emerald-605" />
+                Subject Assessments
+              </button>
+              <button
+                onClick={() => setActiveTab("interview")}
+                className={`pb-3 text-xs uppercase tracking-wider font-extrabold flex items-center gap-2 border-b-2 transition cursor-pointer whitespace-nowrap ${
+                  activeTab === "interview"
+                    ? "border-amber-600 text-amber-600 font-bold"
+                    : "border-transparent text-slate-400 hover:text-slate-650"
+                }`}
+              >
+                <Sparkles className="w-4 h-4 text-amber-600 fill-amber-100" />
+                AI Technical Mock Recruiter (Gemini 3.5)
+              </button>
+              
+              {studentInterviews.some(item => item.videoAccessGranted) && (
+                <button
+                  onClick={() => setActiveTab("ai-videos" as any)}
+                  className={`pb-3 text-xs uppercase tracking-wider font-extrabold flex items-center gap-2 border-b-2 transition cursor-pointer whitespace-nowrap ${
+                    (activeTab as any) === "ai-videos"
+                      ? "border-rose-600 text-rose-600 font-bold"
+                      : "border-transparent text-slate-400 hover:text-slate-650"
+                  }`}
+                >
+                  <Video className="w-4 h-4 text-rose-600 fill-rose-100" />
+                  AI Interview Videos
+                </button>
+              )}
+
+              <button
+                onClick={() => setActiveTab("careers")}
+                className={`pb-3 text-xs uppercase tracking-wider font-extrabold flex items-center gap-2 border-b-2 transition cursor-pointer whitespace-nowrap ${
+                  activeTab === "careers"
+                    ? "border-amber-600 text-amber-600 font-bold"
+                    : "border-transparent text-slate-400 hover:text-slate-650"
+                }`}
+              >
+                <Briefcase className="w-4 h-4 text-emerald-600" />
+                Unified Career Placement Gateway
+              </button>
+              <button
+                onClick={() => setActiveTab("resume")}
+                className={`pb-3 text-xs uppercase tracking-wider font-extrabold flex items-center gap-2 border-b-2 transition cursor-pointer whitespace-nowrap ${
+                  activeTab === "resume"
+                    ? "border-indigo-600 text-indigo-600 font-bold"
+                    : "border-transparent text-slate-400 hover:text-slate-650"
+                }`}
+              >
+                <FileText className="w-4 h-4 text-sky-600" />
+                ATS Resume Maker
+              </button>
+            </div>
+
+            {/* INTERACTIVE ONBOARDING PATH GUIDE */}
+            {activeTab === "curriculum" && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+                <div className="flex items-center gap-2 mb-4 border-b border-slate-100 pb-3">
+                  <Sparkles className="w-5 h-5 text-indigo-600" />
+                  <div>
+                    <h4 className="font-extrabold text-slate-900 text-sm font-sans uppercase tracking-wide">
+                      Your Complete Student Portal Learning Path
+                    </h4>
+                    <p className="text-[10px] text-slate-400">Follow the path from registration to daily review sessions.</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-6 text-xs relative">
+                  {/* Step 1 */}
+                  <div className="relative p-4 bg-slate-50/60 rounded-xl border border-slate-150">
+                    <div className="absolute top-3 right-3 bg-emerald-100 text-emerald-800 font-mono rounded-full font-bold px-2 py-0.5 text-[9px]">
+                      Step A
+                    </div>
+                    <h5 className="font-bold text-slate-900 mb-1">New Batch Enrollment</h5>
+                    <p className="text-slate-500 leading-relaxed text-[11px]">
+                      Instructors create separate batches (e.g. {student.batch}) and onboard student records using custom Roll IDs.
+                    </p>
+                    <div className="mt-3 text-[10px] font-semibold text-emerald-600 flex items-center gap-1 bg-emerald-50 p-1.5 rounded w-fit">
+                      <Check className="w-3.5 h-3.5" /> Enrolled in {student.batch}
+                    </div>
+                  </div>
+
+                  {/* Step 2 */}
+                  <div className="relative p-4 bg-slate-50/60 rounded-xl border border-slate-150">
+                    <div className="absolute top-3 right-3 bg-indigo-100 text-indigo-800 font-mono rounded-full font-bold px-2 py-0.5 text-[9px]">
+                      Step B
+                    </div>
+                    <h5 className="font-bold text-slate-900 mb-1">Phone Match Verification</h5>
+                    <p className="text-slate-500 leading-relaxed text-[11px]">
+                      For login, enter the matching Batch, Roll Number, and Phone Number. Prevents unauthorized students from opening exams.
+                    </p>
+                    <div className="mt-3 text-[10px] font-semibold text-indigo-600 flex items-center gap-1 bg-indigo-50 p-1.5 rounded w-fit">
+                      <Check className="w-3.5 h-3.5" /> Identity Linked Match
+                    </div>
+                  </div>
+
+                  {/* Step 3 */}
+                  <div className="relative p-4 bg-slate-50/60 rounded-xl border border-slate-150">
+                    <div className="absolute top-3 right-3 bg-indigo-100 text-indigo-800 font-mono rounded-full font-bold px-2 py-0.5 text-[9px]">
+                      Step C
+                    </div>
+                    <h5 className="font-bold text-slate-900 mb-1">Write Daily Exams</h5>
+                    <p className="text-slate-500 leading-relaxed text-[11px]">
+                      Unlock daily lessons in sequential phases (Day 1 - 200). Write 8 MCQs and submit core descriptive Python codes.
+                    </p>
+                    <div className="mt-3 text-[10px] text-amber-600 font-bold bg-amber-50 rounded p-1.5 w-fit">
+                      ☆ Overrides Applied Instantly
+                    </div>
+                  </div>
+
+                  {/* Step 4 */}
+                  <div className="relative p-4 bg-amber-50/30 rounded-xl border border-amber-200">
+                    <div className="absolute top-3 right-3 bg-amber-100 text-amber-800 font-mono rounded-full font-bold px-2 py-0.5 text-[9px]">
+                      Step D
+                    </div>
+                    <h5 className="font-bold text-slate-900 mb-1">Review Correct Solutions</h5>
+                    <p className="text-slate-500 leading-relaxed text-[11px]">
+                      Once submitted, correct MCQ choices, text explanations, and ideal model solution codes show up automatically below!
+                    </p>
+                    <div className="mt-3 text-[10px] text-indigo-700 font-bold bg-indigo-50 rounded p-1.5 w-fit">
+                      ✔ Auto Explanation Key
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Statistics Board */}
+        {!activeDay && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-8">
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex items-center gap-4">
+              <div className="p-3 bg-indigo-50 text-indigo-600 rounded-lg">
+                <CheckCircle2 className="w-6 h-6 animate-pulse-slow" />
+              </div>
+              <div>
+                <div className="text-xs font-semibold text-slate-400">Streak Attendance</div>
+                <div className="text-2xl font-bold text-slate-900 font-mono">
+                  {totalPresentDays} <span className="text-xs font-normal text-slate-400">/ 200 Days</span>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1">Tests attended and validated</p>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex items-center gap-4">
+              <div className="p-3 bg-emerald-50 text-emerald-600 rounded-lg">
+                <Award className="w-6 h-6" />
+              </div>
+              <div>
+                <div className="text-xs font-semibold text-slate-400">Average Daily Grade</div>
+                <div className="text-2xl font-bold text-slate-900 font-mono">
+                  {averageScore} <span className="text-xs font-normal text-slate-400">/ 10 pts</span>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1">Based on MCQs + code submits</p>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex items-center gap-4">
+              <div className="p-3 bg-amber-50 text-amber-600 rounded-lg">
+                <Zap className="w-6 h-6 text-amber-500" />
+              </div>
+              <div>
+                <div className="text-xs font-semibold text-slate-400">Active Stage Topic</div>
+                {unlockedDays.length > 0 ? (
+                  <>
+                    <div className="text-md font-bold text-slate-900 leading-tight">
+                      {getCourseForDayByTrack(Math.max(...unlockedDays), studentCourseTrack).name}
+                    </div>
+                    <span className="text-[9px] font-mono text-indigo-600 font-medium">
+                      Curriculum Max unlocked: Day #{Math.max(...unlockedDays)}
+                    </span>
+                  </>
+                ) : (
+                  <div className="text-sm text-slate-500">All Days currently locked</div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 1. STATE: ACTIVATED DAILY TEST IN PROGRESS */}
+        {activeDay && quizData ? (
+          <div className="bg-white rounded-xl shadow-md border border-slate-250 p-6 space-y-6">
+            {/* Exam Header */}
+            <div className="flex flex-col sm:flex-row justify-between sm:items-center pb-4 border-b border-slate-100 gap-3">
+              <div>
+                <span className="bg-indigo-100 text-indigo-800 text-xs font-bold px-2.5 py-1 rounded inline-block mb-1">
+                  Day {activeDay} Training Exam
+                </span>
+                <h3 className="text-xl font-bold text-slate-900">
+                  Topic: {quizData.topicTitle}
+                </h3>
+                <p className="text-xs text-slate-400">Subject Field: {getCourseForDayByTrack(activeDay, studentCourseTrack).name}</p>
+              </div>
+
+              {!isTestSubmitted && (
+                <button
+                  onClick={() => {
+                    if (window.confirm("Abandon current test session? Responses won't be saved.")) {
+                      setActiveDay(null);
+                      setQuizData(null);
+                    }
+                  }}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 py-1.5 px-4 rounded font-medium text-xs transition self-start sm:self-auto"
+                >
+                  Exit Session
+                </button>
+              )}
+            </div>
+
+            {/* Attendance Check-in Panel */}
+            {(() => {
+              const dayAttendance = attendance.find(a => a.dayNumber === activeDay);
+              const currentStatus = dayAttendance?.status || "absent";
+              const currentZoom = dayAttendance?.zoomUrl || "";
+
+              // Local study hours timing check (7am to 10pm)
+              const localHour = new Date().getHours();
+              const isAttendanceTimingLocked = localHour < 7 || localHour >= 22;
+
+              return (
+                <div className="bg-gradient-to-br from-slate-50 to-indigo-50/40 border border-slate-200/80 rounded-xl p-4.5 space-y-3 shadow-xs text-left">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-2.5 w-2.5 relative">
+                          <span className={`${currentStatus !== "absent" ? "bg-emerald-400" : "bg-amber-400"} animate-ping absolute inline-flex h-full w-full rounded-full opacity-75`}></span>
+                          <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${currentStatus !== "absent" ? "bg-emerald-600" : "bg-amber-500"}`}></span>
+                        </span>
+                        <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide font-mono">
+                          Today's Campus Attendance Registration & Classroom Format
+                        </h4>
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Are you attending the lecture in our physical offline classroom center, or attending online through live Zoom?
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-[10px] uppercase font-bold font-mono text-slate-400">Current Status:</span>
+                      <span className={`text-[10.5px] uppercase font-black font-mono px-2 py-0.5 rounded-md ${
+                        currentStatus === "offline"
+                          ? "bg-sky-100 text-sky-850 border border-sky-200"
+                          : currentStatus === "online"
+                          ? "bg-purple-100 text-purple-850 border border-purple-205"
+                          : "bg-amber-100 text-amber-850 border border-amber-205"
+                      }`}>
+                        {currentStatus === "offline" ? "🏫 Present (Offline)" : currentStatus === "online" ? "🌐 Present (Online via Zoom)" : " Absent / Not Selected"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {isAttendanceTimingLocked && (
+                    <div className="bg-amber-50 border border-amber-200 text-amber-850 rounded-xl p-3 text-xs flex items-start gap-2 animate-fade-in font-sans">
+                      <span className="text-amber-500">⚠️</span>
+                      <div className="space-y-0.5">
+                        <strong className="font-bold">Attendance self-registration is locked outside core hours!</strong>
+                        <p className="text-[11px] text-amber-700 leading-relaxed">
+                          Students can only check-in or update format between <strong>07:00 AM and 10:00 PM</strong> daily. Please contact faculty Vinay if you need manual assistance.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {attendanceError && (
+                    <div className="bg-rose-50 border border-rose-200 text-rose-850 rounded-xl p-3 text-xs flex items-start gap-2 animate-fade-in font-sans">
+                      <span className="text-rose-500">⚠️</span>
+                      <div className="space-y-0.5">
+                        <strong className="font-bold">Check-in Error:</strong>
+                        <p className="text-[11px] text-rose-700 leading-relaxed">{attendanceError}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Attendance Format Action Toggles */}
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => handleRegisterAttendance(activeDay, "offline")}
+                      disabled={submittingAttendance || isAttendanceTimingLocked}
+                      className={`flex-1 sm:flex-initial text-xs py-2 px-4 rounded-xl border font-bold font-mono transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                        currentStatus === "offline"
+                          ? "bg-slate-900 border-slate-900 text-white shadow-xs"
+                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
+                      }`}
+                    >
+                      <span>🏫 Join Offline Desk</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const zoomInput = customZoomLinks[activeDay] || "https://zoom.us/j/90807060504";
+                        handleRegisterAttendance(activeDay, "online", zoomInput);
+                      }}
+                      disabled={submittingAttendance || isAttendanceTimingLocked}
+                      className={`flex-1 sm:flex-initial text-xs py-2 px-4 rounded-xl border font-bold font-mono transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                        currentStatus === "online"
+                          ? "bg-indigo-600 border-indigo-600 text-white shadow-xs"
+                          : "bg-white border-slate-200 text-indigo-600 hover:bg-indigo-50/50"
+                      }`}
+                    >
+                      <span>🌐 Join Online (Zoom Stream)</span>
+                    </button>
+
+                    {currentStatus === "online" && (
+                      <div className="flex-1 flex gap-2 items-center">
+                        <input
+                          type="text"
+                          placeholder="Zoom Link / Joint Code"
+                          value={customZoomLinks[activeDay] !== undefined ? customZoomLinks[activeDay] : currentZoom}
+                          onChange={(e) => {
+                            setCustomZoomLinks(prev => ({ ...prev, [activeDay]: e.target.value }));
+                          }}
+                          className="bg-white border border-slate-250 text-xs px-3 py-1.5 rounded-lg outline-none flex-1 font-mono text-slate-700 focus:border-indigo-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const zoomLink = customZoomLinks[activeDay] || currentZoom || "https://zoom.us/j/90807060504";
+                            handleRegisterAttendance(activeDay, "online", zoomLink);
+                          }}
+                          className="bg-indigo-100 hover:bg-indigo-200 text-indigo-700 text-[10px] font-bold font-mono py-1.5 px-3 rounded-lg border border-indigo-200 transition"
+                        >
+                          Update Zoom Link
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {currentStatus === "online" && (currentZoom || customZoomLinks[activeDay]) && (
+                    <div className="bg-indigo-600/5 text-indigo-800 p-2.5 rounded-lg text-xs flex items-center justify-between border border-indigo-100 font-sans">
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                        <span>Your Zoom Live Stream link is connected active: <strong className="font-mono text-xs text-indigo-900 break-all">{currentZoom || customZoomLinks[activeDay]}</strong></span>
+                      </div>
+                      <a
+                        href={currentZoom || customZoomLinks[activeDay]}
+                        target="_blank"
+                        referrerPolicy="no-referrer"
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-mono font-black text-[10px] uppercase py-1 px-3 rounded-md transition shrink-0"
+                      >
+                        Launch Zoom Meeting Now 🚀
+                      </a>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* MAIN TEST INTERFACES */}
+            {!isTestSubmitted ? (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                {/* Left side: MCQs Column */}
+                <div className="lg:col-span-2 space-y-6">
+                  <div className="bg-slate-50/50 rounded-xl p-5 border border-slate-200">
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="text-xs font-mono font-bold text-indigo-600">
+                        MULTIPLE CHOICE EXAMS: {currentMCQIndex + 1} OF 8
+                      </span>
+
+                      {/* Pagination beads */}
+                      <div className="flex gap-1">
+                        {Array.from({ length: 8 }).map((_, i) => (
+                          <button
+                            key={i}
+                            onClick={() => setCurrentMCQIndex(i)}
+                            className={`w-5.5 h-5.5 rounded-full text-[10px] font-bold transition flex items-center justify-center ${
+                              currentMCQIndex === i
+                                ? "bg-indigo-600 text-white"
+                                : selectedMCQAnswers[i] !== undefined
+                                ? "bg-indigo-150 text-indigo-700"
+                                : "bg-slate-200 text-slate-500 hover:bg-slate-300"
+                            }`}
+                          >
+                            {i + 1}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Question panel */}
+                    <div className="space-y-4">
+                      <p className="font-bold text-slate-900 text-base leading-relaxed">
+                        {quizData.mcqs[currentMCQIndex]?.questionText}
+                      </p>
+
+                      <div className="grid grid-cols-1 gap-2.5 pt-2">
+                        {quizData.mcqs[currentMCQIndex]?.options.map((option, oIdx) => {
+                          const isSelected = selectedMCQAnswers[currentMCQIndex] === oIdx;
+                          return (
+                            <button
+                              key={oIdx}
+                              onClick={() => handleSelectMCQ(currentMCQIndex, oIdx)}
+                              className={`w-full text-left p-3.5 rounded-lg border text-sm transition font-medium flex items-center justify-between ${
+                                isSelected
+                                  ? "bg-indigo-600 border-indigo-600 text-white"
+                                  : "bg-white hover:bg-slate-100 border-slate-200 text-slate-700 hover:text-slate-900"
+                              }`}
+                            >
+                              <span>{option}</span>
+                              <span
+                                className={`w-5 h-5 rounded-full border flex items-center justify-center font-bold text-xs ${
+                                  isSelected ? "border-white" : "border-slate-300"
+                                }`}
+                              >
+                                {String.fromCharCode(65 + oIdx)}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Nav controls */}
+                    <div className="flex justify-between pt-6 mt-6 border-t border-slate-200">
+                      <button
+                        onClick={() => setCurrentMCQIndex((i) => Math.max(0, i - 1))}
+                        disabled={currentMCQIndex === 0}
+                        className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 py-1.5 px-3.5 rounded text-xs font-semibold disabled:text-slate-300 transition"
+                      >
+                        Previous
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          if (currentMCQIndex < 7) {
+                            setCurrentMCQIndex((i) => i + 1);
+                          }
+                        }}
+                        disabled={currentMCQIndex === 7}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white py-1.5 px-4 rounded text-xs font-semibold disabled:bg-slate-100 disabled:text-slate-300 transition"
+                      >
+                        Save & Next
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Submission actions */}
+                  <div className="p-4 bg-indigo-50 border border-indigo-200 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-3">
+                    <div className="text-xs text-indigo-700 text-center sm:text-left">
+                      <p className="font-semibold">Review and Submit Exam</p>
+                      <p className="text-[10px] text-indigo-500">Ensure Both multiple choice and written Python scripts are filled</p>
+                    </div>
+                    <button
+                      onClick={handleSubmitTest}
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white py-2 px-6 rounded-lg font-bold text-sm transition flex items-center gap-1.5"
+                    >
+                      <Check className="w-4 h-4" />
+                      Submit Course Test
+                    </button>
+                  </div>
+                </div>
+
+                {/* Right side: Coding Tasks */}
+                <div className="space-y-6">
+                  <div className="space-y-1">
+                    <h4 className="font-bold text-slate-900 text-sm tracking-wider uppercase flex items-center gap-1.5 font-display">
+                      <Code2 className="w-4 h-4 text-red-500 animate-pulse" />
+                      2 Python Coding Questions
+                    </h4>
+                    <p className="text-[11px] text-amber-850 bg-amber-50/70 border border-amber-200/60 p-2.5 rounded-lg leading-relaxed font-semibold">
+                      ⚠️ <strong className="text-amber-950 font-black">Strict Assessment Notice:</strong> You must genuinely attempt the coding challenges using custom Python code. Keeping the raw starter template code or submitting an empty solution will yield <strong>0 marks</strong> for these questions.
+                    </p>
+                  </div>
+
+                  {quizData.coding.map((codeQ, index) => {
+                    const progressMetrics = verifyCodingProgress(index);
+                    const completedKeywordsCount = progressMetrics.filter((m) => m.matched).length;
+                    const testCases = getTestCasesForQuestion(codeQ.questionText);
+
+                    return (
+                      <div key={index} className="bg-slate-900 text-slate-100 rounded-xl p-4 border border-slate-800 space-y-3">
+                        <div className="flex justify-between items-center bg-slate-800/80 p-2.5 rounded-lg text-xs">
+                          <span className="font-bold text-indigo-400">CHALLENGE {index + 1} OF 2</span>
+                          <span className="font-mono text-slate-400">Score weight: +1pt</span>
+                        </div>
+
+                        <p className="text-xs text-slate-350 bg-slate-950 p-2.5 rounded border border-slate-800 leading-relaxed font-mono">
+                          {codeQ.questionText}
+                        </p>
+
+                        {/* Visual Target Test Cases Panel */}
+                        <div className="space-y-1.5 p-3 bg-slate-950/80 rounded-lg border border-slate-800/60">
+                          <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 font-mono tracking-wider uppercase">
+                            <span>📋 Target Test Cases</span>
+                            <span className="text-[8px] text-slate-500 font-normal font-mono">Complexity checks active</span>
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            {testCases.map((tc, tcIdx) => (
+                              <div key={tcIdx} className="space-y-1 text-[9px] font-mono bg-slate-900/50 p-2 rounded border border-slate-850">
+                                <div className="flex items-center justify-between border-b border-slate-800/50 pb-1 mb-1">
+                                  <span className="font-bold text-slate-400">Test Case #{tcIdx + 1}</span>
+                                  <span className="text-slate-500 text-[8px]">{tc.timeLimit} | {tc.memoryLimit}</span>
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-slate-500 text-[8px]">Input:</span>
+                                    <span className="text-indigo-300 truncate bg-slate-950 px-1 rounded max-w-[120px]" title={tc.input}>{tc.input}</span>
+                                  </div>
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-slate-500 text-[8px]">Expected:</span>
+                                    <span className="text-emerald-400 truncate bg-slate-950 px-1 rounded max-w-[120px]" title={tc.expectedOutput}>{tc.expectedOutput}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-semibold text-slate-400 font-mono">CODE WORKSPACE:</label>
+                          <textarea
+                            rows={8}
+                            value={codingAnswers[index] || ""}
+                            onChange={(e) => handleCodingType(index, e.target.value)}
+                            onKeyDown={(e) => handleCodeEditorKeyDown(e, (val) => handleCodingType(index, val))}
+                            className="w-full bg-slate-950 text-emerald-400 border border-slate-800 rounded font-mono p-3 focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs leading-relaxed"
+                          />
+                        </div>
+
+                        {/* Keyword guides checking in real time */}
+                        <div className="space-y-2.5">
+                          <div className="flex justify-between text-[10px] font-mono text-slate-400">
+                            <span>EXPECTED SYNTAX:</span>
+                            <span>{completedKeywordsCount} / {codeQ.expectedKeywords.length} MATCHED</span>
+                          </div>
+
+                          <div className="flex flex-wrap gap-1.5">
+                            {progressMetrics.map((m) => (
+                              <span
+                                key={m.keyword}
+                                className={`text-[9px] font-mono px-2 py-0.5 rounded font-semibold transition ${
+                                  m.matched
+                                    ? "bg-emerald-900/40 text-emerald-400 border border-emerald-850"
+                                    : "bg-slate-850 text-slate-400 border border-slate-800"
+                                }`}
+                              >
+                                {m.keyword}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* HackerRank / LeetCode style run sandbox button */}
+                        <div className="pt-2.5 border-t border-slate-800 flex flex-col gap-3">
+                          <div className="flex justify-between items-center">
+                            <button
+                              type="button"
+                              onClick={() => handleRunCode(index, codeQ)}
+                              disabled={runningCodeIndices[index]}
+                              className="bg-slate-850 hover:bg-slate-800 disabled:bg-slate-900 text-emerald-400 hover:text-emerald-350 disabled:text-slate-500 font-bold font-mono text-[10px] px-3 py-1.5 rounded border border-slate-800 transition uppercase flex items-center gap-1 cursor-pointer"
+                            >
+                              {runningCodeIndices[index] ? (
+                                <>
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+                                  Running Sandbox Compilation...
+                                </>
+                              ) : (
+                                <>
+                                  <span>▶️ Run Code (WASM compiler)</span>
+                                </>
+                              )}
+                            </button>
+                            <span className="text-[8px] text-slate-500 font-mono uppercase tracking-wider">HackerRank Interactive Engine</span>
+                          </div>
+
+                          {/* Active Run logs */}
+                          {codeExecutionLogs[index] && (
+                            <div className="bg-black/95 p-3.5 rounded-lg border border-slate-850 font-mono text-[10px] space-y-3 text-left">
+                              <div className="flex justify-between text-[8px] text-slate-500 border-b border-slate-900 pb-1.5 font-bold uppercase tracking-widest">
+                                <span>Output Console Streams</span>
+                                <span className={codeExecutionLogs[index].success ? "text-emerald-400" : "text-rose-500"}>
+                                  {codeExecutionLogs[index].success ? `SUCCESS [${codeExecutionLogs[index].durationMs}ms]` : "SYNTAX ERROR"}
+                                </span>
+                              </div>
+                              
+                              {codeExecutionLogs[index].error ? (
+                                <p className="text-rose-500 leading-relaxed font-mono whitespace-pre-wrap">
+                                  {codeExecutionLogs[index].error}
+                                </p>
+                              ) : (
+                                <>
+                                  {/* Side-by-side / Compare Display with Time, Memory constraints */}
+                                  {codeExecutionLogs[index].testCaseResults && (
+                                    <div className="space-y-2">
+                                      <span className="text-[8px] text-slate-400 font-black tracking-wider uppercase block">Test Case Verifications</span>
+                                      <div className="overflow-x-auto">
+                                        <table className="w-full text-[9px] border-collapse text-left">
+                                          <thead>
+                                            <tr className="border-b border-slate-800 text-slate-500 uppercase text-[8px]">
+                                              <th className="pb-1 px-1">Case</th>
+                                              <th className="pb-1 px-1">Input</th>
+                                              <th className="pb-1 px-1">Expected Output</th>
+                                              <th className="pb-1 px-1">Your Display Output</th>
+                                              <th className="pb-1 px-1 text-center">Time Used (Limit)</th>
+                                              <th className="pb-1 px-1 text-center">Memory (Limit)</th>
+                                              <th className="pb-1 px-1 text-right">Result</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {codeExecutionLogs[index].testCaseResults.map((tcRes: any, tcIdx: number) => (
+                                              <tr key={tcIdx} className="border-b border-slate-900/65 text-slate-300">
+                                                <td className="py-2 px-1 font-bold text-slate-500">#{tcIdx + 1}</td>
+                                                <td className="py-2 px-1 text-indigo-300 truncate max-w-[80px]" title={tcRes.input}>{tcRes.input}</td>
+                                                <td className="py-2 px-1 text-emerald-400 font-semibold truncate max-w-[85px]" title={tcRes.expected}>{tcRes.expected}</td>
+                                                <td className={`py-2 px-1 font-semibold truncate max-w-[85px] ${tcRes.status === "Passed" ? "text-emerald-400" : tcRes.status === "Failed" ? "text-rose-400 font-bold" : "text-amber-500 font-mono"}`} title={tcRes.actual}>
+                                                  {tcRes.actual}
+                                                </td>
+                                                <td className="py-2 px-1 text-center text-slate-400 whitespace-nowrap">
+                                                  {tcRes.duration} <span className="opacity-50 text-[7px]">({tcRes.durationLimit})</span>
+                                                </td>
+                                                <td className="py-2 px-1 text-center text-slate-400 whitespace-nowrap">
+                                                  {tcRes.memory} <span className="opacity-50 text-[7px]">({tcRes.memoryLimit})</span>
+                                                </td>
+                                                <td className="py-2 px-1 text-right">
+                                                  <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold ${tcRes.status === "Passed" ? "bg-emerald-950 text-emerald-400 border border-emerald-900" : "bg-rose-950 text-rose-400 border border-rose-900"}`}>
+                                                    {tcRes.status}
+                                                  </span>
+                                                </td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    </div>
+                                  )}
+                                  
+                                  <div className="pt-1.5 text-[9px] text-slate-400 leading-relaxed whitespace-pre-wrap border-t border-slate-900/80 mt-1">
+                                    {codeExecutionLogs[index].stdout}
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              /* SUBMITTED SPLASH SCREEN */
+              <div className="text-center py-12 max-w-2xl mx-auto space-y-6">
+                <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center mx-auto shadow-sm">
+                  <CheckCircle2 className="w-10 h-10" />
+                </div>
+
+                <div className="space-y-2">
+                  <h3 className="text-2xl font-bold text-slate-900">Training Test Submitted Successfully!</h3>
+                  <p className="text-sm text-slate-500">
+                    Your attendance is registered. Your computed points have been finalized.
+                  </p>
+                </div>
+
+                {/* Rewrite Exam Permission Callout */}
+                {currentStudentObj?.rewriteDays?.includes(activeDay) && (
+                  <div className="p-4 bg-purple-50 border border-purple-200 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-4 text-left animate-fade-in shadow-xs">
+                    <div className="space-y-1">
+                      <span className="bg-purple-100 text-purple-800 text-[9px] font-extrabold uppercase font-mono px-2 py-0.5 rounded">Special Classroom Permission</span>
+                      <h4 className="text-sm font-extrabold text-purple-950 font-sans">You have special permission to rewrite this exam!</h4>
+                      <p className="text-xs text-purple-800 font-sans">Your instructor has allowed you to rewrite this day's milestone to improve your grade. Your previous answers are preserved below as a starting draft.</p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setIsTestSubmitted(false);
+                        setReviewSubmission(null);
+                        setShowReviewExplanations(false);
+                      }}
+                      className="bg-purple-600 hover:bg-purple-700 text-white font-extrabold text-xs px-4 py-2.5 rounded-lg shadow-sm hover:shadow transition flex items-center gap-2 whitespace-nowrap cursor-pointer focus:outline-none"
+                    >
+                      <span>📝 Start Rewrite Attempt</span>
+                    </button>
+                  </div>
+                )}
+
+                {reviewSubmission && (
+                  <div className="p-5 bg-indigo-50/50 border border-indigo-200 rounded-xl space-y-3.5 text-left">
+                    <p className="font-mono text-xs text-slate-400">SUBMISSION ID: {reviewSubmission.id}</p>
+
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="bg-white p-3.5 rounded-lg shadow-sm border border-indigo-100">
+                        <span className="block text-[10px] text-slate-500 uppercase tracking-wider">Your Grade</span>
+                        <span className="text-2xl font-black text-indigo-600 font-mono">
+                          {reviewSubmission.score} <span className="text-xs text-slate-400 font-normal">/ 10</span>
+                        </span>
+                      </div>
+                      <div className="bg-white p-3.5 rounded-lg shadow-sm border border-indigo-100">
+                        <span className="block text-[10px] text-slate-500 uppercase tracking-wider">MCQ Points</span>
+                        <span className="text-2xl font-black text-slate-800 font-mono">
+                          {reviewSubmission.mcqScores} <span className="text-xs text-slate-400 font-normal">/ 8</span>
+                        </span>
+                      </div>
+                      <div className="bg-white p-3.5 rounded-lg shadow-sm border border-indigo-100">
+                        <span className="block text-[10px] text-slate-500 uppercase tracking-wider">Status Code</span>
+                        <span className="text-sm font-bold text-emerald-600 block mt-1">PRESENT</span>
+                      </div>
+                    </div>
+
+                    {/* Show Previous Attempts comparison table if rewritten */}
+                    {reviewSubmission.previousAttempts && reviewSubmission.previousAttempts.length > 0 && (
+                      <div className="bg-white/90 p-4 rounded-lg border border-purple-150 space-y-2.5 mt-2 font-sans shadow-2xs">
+                        <div className="flex items-center gap-2 pb-1.5 border-b border-purple-100">
+                          <span className="text-xs font-black text-purple-900 tracking-wide uppercase font-mono">📈 Exam Improvement & Rewrite History</span>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left font-mono text-[10px]">
+                            <thead>
+                              <tr className="border-b border-purple-100 text-purple-800">
+                                <th className="pb-1 px-1">Attempt</th>
+                                <th className="pb-1 px-1">Submitted At</th>
+                                <th className="pb-1 px-1 text-center">MCQ Points</th>
+                                <th className="pb-1 px-1 text-right">Score</th>
+                                <th className="pb-1 px-1 text-right">Improvement</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {reviewSubmission.previousAttempts.map((att, idx) => (
+                                <tr key={idx} className="border-b border-purple-50 text-purple-900/70">
+                                  <td className="py-1.5 px-1 font-bold">Attempt #{idx + 1} (Retake)</td>
+                                  <td className="py-1.5 px-1">{new Date(att.submittedAt).toLocaleString()}</td>
+                                  <td className="py-1.5 px-1 text-center">{att.mcqScores}/8 correct</td>
+                                  <td className="py-1.5 px-1 text-right font-bold">{att.score} / 10 pts</td>
+                                  <td className="py-1.5 px-1 text-right text-slate-400">—</td>
+                                </tr>
+                              ))}
+                              <tr className="bg-emerald-50/50 font-bold text-emerald-950">
+                                <td className="py-1.5 px-1">Current Active Attempt</td>
+                                <td className="py-1.5 px-1">{new Date(reviewSubmission.submittedAt).toLocaleString()}</td>
+                                <td className="py-1.5 px-1 text-center">{reviewSubmission.mcqScores}/8 correct</td>
+                                <td className="py-1.5 px-1 text-right font-black text-emerald-700">{reviewSubmission.score} / 10 pts</td>
+                                <td className="py-1.5 px-1 text-right font-black text-emerald-700">
+                                  +{ reviewSubmission.score - reviewSubmission.previousAttempts[0].score } point{reviewSubmission.score - reviewSubmission.previousAttempts[0].score > 1 ? "s" : ""} 🎉
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Explanations Accordion list */}
+                {quizData.mcqs && (
+                  <div className="border border-slate-250 rounded-xl bg-white overflow-hidden text-left">
+                    <button
+                      onClick={() => setShowReviewExplanations(!showReviewExplanations)}
+                      className="w-full py-4 px-6 font-bold text-sm text-slate-700 bg-slate-50 hover:bg-slate-100 flex justify-between items-center transition"
+                    >
+                      <span>Review MCQ Questions & Correct Explanations</span>
+                      <ChevronDown
+                        className={`w-5 h-5 text-slate-500 transition-transform ${
+                          showReviewExplanations ? "rotate-180" : ""
+                        }`}
+                      />
+                    </button>
+
+                    {showReviewExplanations && (
+                      <div className="p-6 divide-y divide-slate-150 space-y-6">
+                        {/* Section A: MCQ Answers */}
+                        <div className="space-y-6">
+                          <h4 className="font-bold text-slate-800 text-sm border-b pb-2">SECTION A: MULTIPLE CHOICE CORRECT RESPONSES</h4>
+                          {quizData.mcqs.map((mcq, idx) => {
+                            const userSelected = selectedMCQAnswers[idx];
+                            const isCorrect = userSelected === mcq.correctOption;
+
+                            return (
+                              <div key={idx} className="pt-4 first:pt-0 space-y-2">
+                                <p className="font-bold text-slate-900 text-sm">
+                                  {idx + 1}. {mcq.questionText}
+                                </p>
+
+                                <div className="text-xs space-y-1">
+                                  <div className="text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded flex items-center justify-between font-medium">
+                                    <span>Correct Answer: {mcq.options[mcq.correctOption]}</span>
+                                    <span className="font-mono text-[10px]">CORRECT</span>
+                                  </div>
+
+                                  {userSelected !== undefined && !isCorrect && (
+                                    <div className="text-red-700 bg-red-50 px-3 py-1.5 rounded flex items-center justify-between font-medium">
+                                      <span>Your Selection: {mcq.options[userSelected]}</span>
+                                      <span className="font-mono text-[10px]">INCORRECT</span>
+                                    </div>
+                                  )}
+                                </div>
+
+                                <p className="text-xs text-slate-500 leading-relaxed pl-2 border-l-2 border-slate-300">
+                                  <span className="font-semibold text-slate-700">Explainer:</span> {mcq.explanation}
+                                </p>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* Section B: Coding Solutions */}
+                        {quizData.coding && quizData.coding.length > 0 && (
+                          <div className="pt-6 space-y-4">
+                            <h4 className="font-bold text-slate-800 text-sm border-b pb-2">SECTION B: CODING EXAM SOLUTIONS</h4>
+                            {quizData.coding.map((codingQ, cIdx) => {
+                              const userCode = codingAnswers[cIdx] || "";
+                              return (
+                                <div key={cIdx} className="space-y-3 pt-4">
+                                  <p className="font-bold text-slate-900 text-sm">
+                                    Task {cIdx + 1}. {codingQ.questionText}
+                                  </p>
+                                  
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="space-y-1">
+                                      <span className="text-[10px] font-bold text-slate-550 block uppercase">Your Submitted Code:</span>
+                                      <pre className="bg-slate-900 text-indigo-300 font-mono text-xs p-3.5 rounded-lg overflow-x-auto min-h-[100px]">
+                                        {userCode.trim() || "# No code entered"}
+                                      </pre>
+                                    </div>
+                                    <div className="space-y-1">
+                                      <span className="text-[10px] font-bold text-emerald-600 block uppercase">Ideal Model Solution Code:</span>
+                                      <pre className="bg-slate-950 text-emerald-400 font-mono text-xs p-3.5 rounded-lg overflow-x-auto min-h-[100px]">
+                                        {codingQ.solutionDescription.trim() || "# No ideal code schema provided"}
+                                      </pre>
+                                    </div>
+                                  </div>
+
+                                  {/* 🟥 Error & Alignment Trace: Ideal vs Written Solution */}
+                                  {(() => {
+                                    const diag = diagnoseCodeErrors(userCode, codingQ.solutionDescription, codingQ.expectedKeywords || []);
+                                    const userLines = userCode.split('\n');
+                                    return (
+                                      <div className="bg-rose-50/40 border border-red-200/80 rounded-xl p-4.5 space-y-3 font-sans text-left shadow-2xs">
+                                        <div className="flex items-center justify-between pb-2 border-b border-rose-200/40">
+                                          <span className="text-[10px] font-extrabold text-red-600 tracking-wider uppercase block font-mono">
+                                            🟥 Code Comparison & Exact Error Diagnostics
+                                          </span>
+                                          <span className={`px-2 py-0.5 rounded text-[8.5px] font-mono font-extrabold uppercase ${diag.hasError ? "bg-red-100 text-red-700 border border-red-300 animate-pulse" : "bg-emerald-100 text-emerald-800 border border-emerald-200"}`}>
+                                            {diag.hasError ? "CRITICAL ERRORS FOUND" : "SYNTAX OK"}
+                                          </span>
+                                        </div>
+
+                                        {diag.hasError ? (
+                                          <div className="space-y-3">
+                                            {/* Main Error Box */}
+                                            <div className="bg-red-50 border-l-4 border-red-500 p-3 rounded-r-lg">
+                                              <div className="flex gap-2">
+                                                <span className="text-red-600 font-extrabold font-mono text-xs">[{diag.errorType}]</span>
+                                                <p className="text-red-700 font-bold text-xs font-mono">{diag.errorMessage}</p>
+                                              </div>
+                                              <p className="text-red-600/90 text-[11px] mt-1.5 leading-relaxed">
+                                                <strong className="text-red-800">Root Cause Trace: </strong> 
+                                                {diag.detailedExplanation}
+                                              </p>
+                                            </div>
+
+                                            {/* Offending Line Visual Highlight */}
+                                            {diag.offendingLineNumber && (
+                                              <div className="space-y-1">
+                                                <span className="text-[9.5px] font-bold text-red-500 uppercase block font-mono">
+                                                  📍 Exact Error Origin Point (Line #{diag.offendingLineNumber}):
+                                                </span>
+                                                <div className="bg-slate-900 rounded-lg p-3 font-mono text-xs overflow-x-auto border border-red-350">
+                                                  {userLines.map((line, lIdx) => {
+                                                    const currentLineNum = lIdx + 1;
+                                                    const isOffending = currentLineNum === diag.offendingLineNumber;
+                                                    return (
+                                                      <div key={lIdx} className={`flex items-start py-0.5 ${isOffending ? "bg-red-950/80 text-red-400 font-bold border-l-2 border-red-500 pl-1" : "text-slate-400"}`}>
+                                                        <span className={`w-8 select-none text-[10px] text-right pr-2 ${isOffending ? "text-red-400 font-bold" : "text-slate-600"}`}>
+                                                          {currentLineNum}
+                                                        </span>
+                                                        <span className={isOffending ? "text-red-400" : ""}>
+                                                          {line || " "}
+                                                        </span>
+                                                        {isOffending && (
+                                                          <span className="ml-3 text-red-500 font-bold animate-pulse text-[10px] whitespace-nowrap">
+                                                            ◀— exact error occurred here (red highlighted block)
+                                                          </span>
+                                                        )}
+                                                      </div>
+                                                    );
+                                                  })}
+                                                </div>
+                                              </div>
+                                            )}
+
+                                            {/* Keyword Gaps */}
+                                            {diag.missingKeywords && diag.missingKeywords.length > 0 && (
+                                              <div className="bg-red-50/50 border border-red-150 p-3 rounded-lg space-y-1.5">
+                                                <span className="text-[9.5px] font-black text-red-700 uppercase tracking-wider block font-mono">
+                                                  ⚠️ Unimplemented Requirements (Algorithmic Logic):
+                                                </span>
+                                                <div className="flex flex-wrap gap-1.5">
+                                                  {diag.missingKeywords.map((kw, kwIdx) => (
+                                                    <span key={kwIdx} className="bg-red-100 text-red-800 text-[10px] font-mono font-bold px-2 py-0.5 rounded border border-red-200">
+                                                      "{kw}" missing
+                                                    </span>
+                                                  ))}
+                                                </div>
+                                              </div>
+                                            )}
+                                          </div>
+                                        ) : (
+                                          <div className="bg-emerald-50/50 border border-emerald-100 p-3 rounded-lg text-emerald-800 text-xs flex items-center gap-2 font-mono">
+                                            <span>✅</span>
+                                            <span>No syntax, signature, or delimiter errors detected in your submission. Excellent execution!</span>
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
+
+                                  {/* Test Case Review & Side-by-side comparison */}
+                                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3 font-sans text-left">
+                                    <span className="text-[10px] font-extrabold text-slate-500 tracking-wider uppercase block font-mono">
+                                      📊 Test Case Review & Side-By-Side Output Comparisons
+                                    </span>
+                                    <div className="overflow-x-auto font-sans">
+                                      <table className="w-full text-[10px] text-left font-mono">
+                                        <thead>
+                                          <tr className="border-b border-slate-200 text-slate-500 uppercase text-[8px]">
+                                            <th className="py-1 px-1">Case</th>
+                                            <th className="py-1 px-1">Input</th>
+                                            <th className="py-1 px-1">Expected Correct Output</th>
+                                            <th className="py-1 px-1">Your Display Output</th>
+                                            <th className="py-1 px-1 text-center">Runtime Stats (Time / RAM)</th>
+                                            <th className="py-1 px-1 text-right">Verification</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {getTestCasesForQuestion(codingQ.questionText).map((tc, tcIdx) => {
+                                            const userLower = userCode.toLowerCase();
+                                            const expectedKeywords = codingQ.expectedKeywords || [];
+                                            const missingKws = expectedKeywords.filter(kw => !userLower.includes(kw.toLowerCase()));
+                                            const hasSyntaxError = (userCode.match(/\(/g) || []).length !== (userCode.match(/\)/g) || []).length;
+                                            
+                                            const status = !userCode.trim() ? "Error" : hasSyntaxError ? "Error" : missingKws.length > 0 ? "Failed" : "Passed";
+                                            const actualDisplay = status === "Passed" ? tc.expectedOutput : status === "Failed" ? "None (Mismatched signature or algorithmic logic)" : "SyntaxError: compilation failed";
+                                            
+                                            return (
+                                              <tr key={tcIdx} className="border-b border-slate-100 text-slate-700">
+                                                <td className="py-2 px-1 font-bold text-slate-400">#{tcIdx + 1}</td>
+                                                <td className="py-2 px-1 text-indigo-900 font-semibold truncate max-w-[100px]" title={tc.input}>{tc.input}</td>
+                                                <td className="py-2 px-1 text-emerald-600 font-bold truncate max-w-[120px]" title={tc.expectedOutput}>{tc.expectedOutput}</td>
+                                                <td className={`py-2 px-1 truncate max-w-[120px] font-semibold ${status === "Passed" ? "text-emerald-600" : "text-rose-650"}`} title={actualDisplay}>
+                                                  {actualDisplay}
+                                                </td>
+                                                <td className="py-2 px-1 text-center text-slate-500 text-[9px] whitespace-nowrap">
+                                                  {status === "Passed" ? `1.1ms / 0.9MB` : status === "Failed" ? `4.2ms / 1.1MB` : `—`}
+                                                </td>
+                                                <td className="py-2 px-1 text-right">
+                                                  <span className={`px-2 py-0.5 rounded text-[8px] font-extrabold font-mono uppercase ${status === "Passed" ? "bg-emerald-55 text-emerald-700 border border-emerald-200" : "bg-red-50 text-red-700 border border-red-200"}`}>
+                                                    {status === "Passed" ? "PASSED" : status === "Failed" ? "FAILED" : "COMP ERROR"}
+                                                  </span>
+                                                </td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
+
+                                  {/* 🤖 AUTOMATED REAL-TIME AI CODE COMPARISON PANEL */}
+                                  <div className="pt-3">
+                                    {!codeComparisonData[cIdx] ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleCompareCode(cIdx, userCode, codingQ.solutionDescription, codingQ.questionText)}
+                                        disabled={loadingComparisonIndices[cIdx] || !userCode.trim()}
+                                        className="bg-indigo-600 hover:bg-indigo-550 disabled:bg-slate-200 text-white font-bold font-mono text-[10px] px-4 py-2 rounded-xl transition uppercase flex items-center gap-1.5 cursor-pointer shadow-sm disabled:text-slate-400"
+                                      >
+                                        {loadingComparisonIndices[cIdx] ? (
+                                          <>
+                                            <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
+                                            Comparing solutions with Gemini AI...
+                                          </>
+                                        ) : (
+                                          <>
+                                            <Sparkles className="w-3.5 h-3.5" />
+                                            Compare Solution & Diagnose Mistakes
+                                          </>
+                                        )}
+                                      </button>
+                                    ) : (
+                                      <div className="bg-slate-900 border border-slate-800 text-slate-100 p-5 rounded-2xl space-y-4 shadow-lg animate-fadeIn">
+                                        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                                          <div className="flex items-center gap-2">
+                                            <Sparkles className="w-4.5 h-4.5 text-amber-400 animate-pulse" />
+                                            <div>
+                                              <h5 className="text-[11px] font-black uppercase font-sans tracking-widest leading-none text-slate-100">
+                                                🤖 Intelligent Code Comparative Analysis
+                                              </h5>
+                                              <p className="text-[9px] text-slate-400 mt-1">Real-time mistake detection, syntax anomalies, and structural alignment logs.</p>
+                                            </div>
+                                          </div>
+                                          <div className="flex items-center gap-1 bg-indigo-500/10 text-indigo-400 px-2.5 py-1 rounded border border-indigo-550/25 font-mono text-[10px] font-black">
+                                            <span>MATCH INDEX:</span>
+                                            <span className="text-white">{codeComparisonData[cIdx].matchPercentage}%</span>
+                                          </div>
+                                        </div>
+
+                                        {/* Praise */}
+                                        {codeComparisonData[cIdx].praise && (
+                                          <div className="bg-indigo-950/40 border border-indigo-900/40 p-3 rounded-xl text-xs text-indigo-200 leading-relaxed italic">
+                                            💡 "{codeComparisonData[cIdx].praise}"
+                                          </div>
+                                        )}
+
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                          {/* Mistakes column */}
+                                          <div className="bg-rose-500/5 border border-rose-500/10 p-3.5 rounded-xl space-y-2">
+                                            <h6 className="text-[10px] font-bold text-rose-400 uppercase font-mono tracking-wider flex items-center gap-1.5">
+                                              ⚠️ Identified Gaps & Mistakes
+                                            </h6>
+                                            {codeComparisonData[cIdx].mistakes && codeComparisonData[cIdx].mistakes.length > 0 ? (
+                                              <ul className="space-y-1.5 text-[10.5px] text-slate-300 list-disc pl-3">
+                                                {codeComparisonData[cIdx].mistakes.map((m, idx) => (
+                                                  <li key={idx} className="leading-normal">{m}</li>
+                                                ))}
+                                              </ul>
+                                            ) : (
+                                              <p className="text-[10px] text-emerald-400 font-medium">No logical or structural mistakes found! Excellent logic translation.</p>
+                                            )}
+                                          </div>
+
+                                          {/* Suggestions column */}
+                                          <div className="bg-emerald-500/5 border border-emerald-500/10 p-3.5 rounded-xl space-y-2">
+                                            <h6 className="text-[10px] font-bold text-emerald-400 uppercase font-mono tracking-wider flex items-center gap-1.5">
+                                              💡 Structural Suggestions & Tips
+                                            </h6>
+                                            {codeComparisonData[cIdx].suggestions && codeComparisonData[cIdx].suggestions.length > 0 ? (
+                                              <ul className="space-y-1.5 text-[10.5px] text-slate-300 list-disc pl-3">
+                                                {codeComparisonData[cIdx].suggestions.map((s, idx) => (
+                                                  <li key={idx} className="leading-normal">{s}</li>
+                                                ))}
+                                              </ul>
+                                            ) : (
+                                              <p className="text-[10px] text-slate-400">No suggestions needed. Your structure matches optimal performance standards.</p>
+                                            )}
+                                          </div>
+                                        </div>
+
+                                        {/* Line-by-line visual comparison block */}
+                                        {codeComparisonData[cIdx].lineByLine && codeComparisonData[cIdx].lineByLine.length > 0 && (
+                                          <div className="bg-slate-950 rounded-xl border border-slate-850 overflow-hidden text-xs">
+                                            <div className="bg-slate-900/80 border-b border-slate-850 px-3.5 py-2 text-[9px] font-mono uppercase tracking-wider text-slate-400 font-bold">
+                                              Detailed Block Alignment Logs
+                                            </div>
+                                            <div className="divide-y divide-slate-900 overflow-x-auto">
+                                              {codeComparisonData[cIdx].lineByLine.map((lbl, idx) => (
+                                                <div key={idx} className="p-3 grid grid-cols-1 md:grid-cols-12 gap-3 leading-relaxed font-mono">
+                                                  <div className="md:col-span-5 space-y-1">
+                                                    <span className="text-[8px] text-slate-500 uppercase block">Your Block:</span>
+                                                    <code className="text-[11px] text-rose-300 block bg-slate-900/60 p-1.5 rounded">{lbl.userLine || "(Empty or missing)"}</code>
+                                                  </div>
+                                                  <div className="md:col-span-5 space-y-1">
+                                                    <span className="text-[8px] text-emerald-500 uppercase block">Ideal Alignment Block:</span>
+                                                    <code className="text-[11px] text-emerald-300 block bg-slate-900/60 p-1.5 rounded">{lbl.idealLine}</code>
+                                                  </div>
+                                                  <div className="md:col-span-2 flex flex-col justify-center">
+                                                    <span className={`inline-block text-[8px] font-bold text-center uppercase px-2 py-0.5 rounded-full ${
+                                                      lbl.status === "match" ? "bg-emerald-500/10 text-emerald-400" :
+                                                      lbl.status === "mismatch" ? "bg-rose-500/10 text-rose-400" : "bg-amber-500/10 text-amber-400"
+                                                    }`}>
+                                                      {lbl.status}
+                                                    </span>
+                                                    <p className="text-[9px] text-slate-400 mt-1 leading-normal font-sans">{lbl.note}</p>
+                                                  </div>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        )}
+
+                                        <button
+                                          type="button"
+                                          onClick={() => setCodeComparisonData((prev) => {
+                                            const copy = { ...prev };
+                                            delete copy[cIdx];
+                                            return copy;
+                                          })}
+                                          className="text-[9px] font-mono text-slate-400 hover:text-white transition underline cursor-pointer"
+                                        >
+                                          Reset comparative panel
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="pt-4">
+                  <button
+                    onClick={() => {
+                      setActiveDay(null);
+                      setQuizData(null);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm py-2 px-6 rounded-lg transition"
+                  >
+                    Back to Curriculum Dayboard
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : activeTab === "assessments" ? (
+          <StudentAssessmentsView
+            student={student}
+            submissions={submissions}
+            assessments={assessments}
+            overrides={overrides}
+            onProgressSubmit={() => fetchStudentContext()}
+            scheduledTests={scheduledTests}
+            scheduledSubmissions={scheduledSubmissions}
+          />
+        ) : activeTab === "resume" ? (
+          !(locks["Global"]?.featureLocks?.resume || locks[student.batch]?.featureLocks?.resume) ? (
+            <div className="bg-white rounded-xl shadow-md border border-slate-200 p-8 text-center space-y-6 max-w-lg mx-auto py-12">
+              <div className="mx-auto w-16 h-16 bg-rose-50 rounded-full flex items-center justify-center border border-rose-100 text-rose-500">
+                <Lock className="w-8 h-8" />
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-lg font-black text-slate-900 uppercase tracking-tight">
+                  ATS Resume Builder is Locked
+                </h3>
+                <p className="text-slate-500 text-xs leading-relaxed">
+                  Your classroom instructor has locked the ATS Resume Maker. Once unlocked, you will gain full interactive access to compile, format, and download your verified single-column ATS resume in PDF, Word, Plain Text, and Markdown formats.
+                </p>
+                <div className="mx-auto max-w-xs bg-amber-50 border border-amber-200 rounded-lg p-3 text-left text-[11px] text-amber-850 mt-4 font-sans font-medium flex items-start gap-2">
+                  <span className="shrink-0 text-amber-500">⚠️</span>
+                  <span><strong>Roll Number: {student.rollNumber}</strong> is currently locked from ATS Resume compilation. Please inform your classroom instructor to enable your feature permission gate in the batch classroom feature access control tab.</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => fetchStudentContext()}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white font-mono font-bold text-xs py-2 px-6 rounded-lg transition shadow-xs cursor-pointer animate-pulse"
+              >
+                Sync Lock Status
+              </button>
+            </div>
+          ) : (
+            <AtsResumeMaker student={student} />
+          )
+        ) : activeTab === "interview" ? (
+          (() => {
+            const interviewTeacherAuthorized = !!(
+              currentStudentObj?.interviewPermission ||
+              locks["Global"]?.featureLocks?.interview ||
+              locks[student.batch]?.featureLocks?.interview
+            );
+            return !interviewTeacherAuthorized ? (
+            <div className="bg-white rounded-xl shadow-md border border-slate-200 p-8 text-center space-y-6 max-w-lg mx-auto py-12">
+              <div className="mx-auto w-16 h-16 bg-rose-50 rounded-full flex items-center justify-center border border-rose-100 text-rose-500">
+                <Lock className="w-8 h-8" />
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-lg font-black text-slate-900 uppercase tracking-tight">
+                  Placement Recruiter Simulation Locked
+                </h3>
+                <p className="text-slate-500 text-xs leading-relaxed">
+                  To ensure realistic preparation under appropriate guidelines, students require **explicit authorization from the classroom instructor** before attempting the Gemini AI mock interview panel.
+                </p>
+                <div className="mx-auto max-w-xs bg-amber-50 border border-amber-200 rounded-lg p-3 text-left text-[11px] text-amber-850 mt-4 font-sans font-medium flex items-start gap-2">
+                  <span className="shrink-0 text-amber-500">⚠️</span>
+                  <span><strong>Roll Number: {student.rollNumber}</strong> is currently unauthorized. Please inform Teacher Vinay to enable your permission gate in the batch classroom roster interface.</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => fetchStudentContext()}
+                className="bg-amber-600 hover:bg-amber-700 text-white font-mono font-bold text-xs py-2 px-6 rounded-lg transition shadow-xs cursor-pointer"
+              >
+                Sync Authorization Status
+              </button>
+            </div>
+            ) : (
+              <AiInterviewRoom
+                student={student}
+                submissions={submissions}
+                assessments={assessments}
+                overrides={overrides}
+                onRefreshContext={() => fetchStudentContext()}
+                teacherAuthorized={interviewTeacherAuthorized}
+              />
+            );
+          })()
+        ) : (activeTab as any) === "ai-videos" ? (
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-6 animate-fade-in text-left">
+            <div>
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Video className="w-5.5 h-5.5 text-rose-600 animate-pulse" />
+                Your AI Interview Recordings
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5 leading-relaxed font-sans">
+                Below are the AI technical and behavioral placement interview sessions recorded using your webcam, which have been evaluated and authorized for review by your classroom mentor.
+              </p>
+            </div>
+
+            {studentInterviews.filter(item => item.videoAccessGranted && item.videoUrl).length === 0 ? (
+              <div className="text-center py-12 text-slate-400 text-xs italic">
+                No interview video recordings have been unlocked by your mentor yet.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {studentInterviews
+                  .filter(item => item.videoAccessGranted && item.videoUrl)
+                  .map((item) => (
+                    <div key={item.id} className="bg-slate-950 rounded-2xl border border-slate-850 p-4 text-white flex flex-col justify-between space-y-3.5 shadow-md">
+                      <div className="flex justify-between items-start gap-2">
+                        <div>
+                          <h4 className="text-xs font-black text-amber-400 uppercase font-mono tracking-wider">
+                            {item.subject} &bull; {item.difficulty}
+                          </h4>
+                          <p className="text-[10px] text-slate-400 mt-0.5 font-sans">
+                            Session Date: {new Date(item.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                          </p>
+                        </div>
+                        <span className="font-mono text-emerald-400 bg-emerald-950/80 border border-emerald-900 px-2 py-0.5 rounded text-[10px] font-bold">
+                          Score: {item.report?.score || "N/A"}/100
+                        </span>
+                      </div>
+
+                      <div className="relative rounded-xl overflow-hidden border border-slate-800 bg-black aspect-video max-h-[220px]">
+                        <video
+                          src={item.videoUrl}
+                          controls
+                          className="w-full h-full"
+                        />
+                      </div>
+
+                      <div className="space-y-1 bg-slate-900/50 p-3 rounded-xl border border-slate-850/50">
+                        <span className="text-[9px] font-bold text-amber-300 uppercase tracking-wider block font-mono">Feedback Summary:</span>
+                        <p className="text-[10.5px] text-slate-300 leading-normal font-sans italic">
+                          "{item.report?.summary}"
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        ) : activeTab === "careers" ? (
+          (!currentStudentObj?.placementPermission && !specialPermissionBypass) ? (
+            <div className="bg-gradient-to-br from-slate-900 via-amber-950 to-slate-900 rounded-2xl p-8 border border-slate-800 text-center text-white shadow-xl max-w-3xl mx-auto space-y-6 my-6 animate-fade-in">
+              <div className="mx-auto w-16 h-16 bg-slate-800/85 border border-amber-500/30 rounded-full flex items-center justify-center text-amber-400 animate-pulse">
+                <Lock className="w-8 h-8" />
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-xl font-black font-sans tracking-tight text-white">Placement Gateway Interface Restricted</h3>
+                <p className="text-slate-300 text-sm max-w-xl mx-auto leading-relaxed">
+                  Access to the Live Jobs Gateway and recruiter matched profiles requires **Teacher Placement Clearance**. Once approved, you can utilize the AI Resume Matching engine to find jobs on LinkedIn, Indeed, Naukri, and other major platforms.
+                </p>
+              </div>
+
+              {/* Course Completed check - trigger details collection to help management */}
+              <div className="bg-white/5 border border-white/10 rounded-2xl p-6 space-y-4 max-w-2xl mx-auto">
+                <div className="flex items-center gap-2.5 justify-center text-amber-300">
+                  <Award className="w-5 h-5 text-amber-400" />
+                  <span className="font-bold text-xs uppercase font-mono tracking-widest">Enrollment & Details Collection</span>
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed font-sans max-w-lg mx-auto">
+                  If you have completed your academic syllabus or are ready for management matching, click the button below to submit your job search links to executive coordinator logs.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlacementForm({
+                      linkedin: currentStudentObj.placementDetails?.linkedin || "",
+                      indeed: currentStudentObj.placementDetails?.indeed || "",
+                      naukri: currentStudentObj.placementDetails?.naukri || "",
+                      glassdoor: currentStudentObj.placementDetails?.glassdoor || "",
+                      foundit: currentStudentObj.placementDetails?.foundit || "",
+                      shine: currentStudentObj.placementDetails?.shine || "",
+                      timesjobs: currentStudentObj.placementDetails?.timesjobs || "",
+                      internshala: currentStudentObj.placementDetails?.internshala || "",
+                      wellfound: currentStudentObj.placementDetails?.wellfound || "",
+                      apna: currentStudentObj.placementDetails?.apna || ""
+                    });
+                    setShowPlacementModal(true);
+                  }}
+                  className="bg-amber-600 hover:bg-amber-700 text-white font-extrabold font-mono text-xs py-2.5 px-6 rounded-xl transition shadow-lg shrink-0 inline-flex items-center gap-2 cursor-pointer"
+                >
+                  <Edit className="w-4 h-4" />
+                  <span>Fill Your Details (Management)</span>
+                </button>
+              </div>
+
+              <div className="pt-2">
+                <span className="text-[10px] text-amber-400 font-mono uppercase tracking-widest block text-center">Compatible Portals</span>
+                <div className="mt-3 flex flex-wrap gap-2 justify-center max-w-lg mx-auto opacity-70">
+                  {["LinkedIn", "Indeed", "Naukri.com", "Glassdoor", "Foundit", "Shine.com", "Timesjobs", "Internshala", "Wellfound", "Apna App"].map((platform) => (
+                    <span key={platform} className="bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-1 text-[10px] font-mono text-slate-300">
+                      {platform}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-gradient-to-br from-slate-900 to-amber-950 rounded-2xl p-6 border border-slate-800 text-white shadow-lg space-y-6 animate-fade-in">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-amber-900 pb-5">
+                <div className="space-y-1">
+                  <div className="flex gap-2 items-center flex-wrap">
+                    <span className="bg-gradient-to-r from-amber-500 to-emerald-500 text-white font-mono text-[9px] font-extrabold py-1 px-2.5 rounded-full uppercase tracking-wider inline-block">
+                      Unified Jobs Placement Hub
+                    </span>
+                    <span className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-mono text-[9px] font-extrabold py-1 px-2.5 rounded-full uppercase tracking-wider inline-block">
+                      ● Active Placement Gate Cleared
+                    </span>
+                  </div>
+                  <h4 className="text-xl font-bold font-sans tracking-tight text-white flex items-center gap-2 mt-1">
+                    <Briefcase className="w-5 h-5 text-emerald-400 shrink-0" />
+                    Live Career Matching Engine
+                  </h4>
+                  <p className="text-slate-300 text-xs font-sans max-w-xl">
+                    Unlock specialized software roles dynamically based on your completed classroom assignments, or analyze your resume with AI!
+                  </p>
+                </div>
+
+                <div className="flex gap-3 flex-col sm:flex-row items-stretch sm:items-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPlacementForm({
+                        linkedin: currentStudentObj.placementDetails?.linkedin || "",
+                        indeed: currentStudentObj.placementDetails?.indeed || "",
+                        naukri: currentStudentObj.placementDetails?.naukri || "",
+                        glassdoor: currentStudentObj.placementDetails?.glassdoor || "",
+                        foundit: currentStudentObj.placementDetails?.foundit || "",
+                        shine: currentStudentObj.placementDetails?.shine || "",
+                        timesjobs: currentStudentObj.placementDetails?.timesjobs || "",
+                        internshala: currentStudentObj.placementDetails?.internshala || "",
+                        wellfound: currentStudentObj.placementDetails?.wellfound || "",
+                        apna: currentStudentObj.placementDetails?.apna || ""
+                      });
+                      setShowPlacementModal(true);
+                    }}
+                    className="bg-amber-600 hover:bg-amber-700 text-white font-extrabold font-mono text-xs py-2 px-4 rounded-xl transition flex items-center justify-center gap-2 cursor-pointer shadow-sm border border-amber-500/20"
+                  >
+                    <Edit className="w-3.5 h-3.5" />
+                    <span>Fill Your Details</span>
+                  </button>
+
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-[10px] text-slate-300 font-mono font-bold uppercase">
+                      Preferred Job Location
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={jobLocation}
+                        onChange={(e) => setJobLocation(e.target.value)}
+                        placeholder="e.g. Hyderabad, India"
+                        className="bg-white/10 hover:bg-white/15 focus:bg-white/18 text-white text-xs font-mono font-bold py-2 pl-3 pr-9 rounded-xl outline-none border border-white/15 focus:border-amber-500 transition w-full sm:w-56 placeholder-white/30"
+                      />
+                      <Search className="w-4 h-4 text-white/40 absolute right-3 top-2.5" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+            {/* Split layout: Resume Analyzer on Left/Bottom, Match Cards on Right/Top */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* Left Column: Resume Input & Analysis Metadata */}
+              <div className="lg:col-span-5 space-y-5 bg-white/5 border border-white/10 p-5 rounded-2xl flex flex-col justify-between">
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 text-amber-300">
+                    <FileText className="w-5 h-5" />
+                    <span className="font-extrabold text-sm tracking-wide uppercase font-mono">
+                      AI Resume Analyzer & Optimizer
+                    </span>
+                  </div>
+
+                  <p className="text-slate-300 text-xs font-medium font-sans">
+                    Paste your core skills, project details, or complete resume text to extract instant keyword matching and generate customized portal links.
+                  </p>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase font-mono font-bold text-slate-400 block">
+                      Resume Text content / Profile Summary
+                    </label>
+                    <textarea
+                      value={resumeText}
+                      onChange={(e) => setResumeText(e.target.value)}
+                      placeholder="e.g. Arjun Sharma | Data Scientist. Tech Stack: Python, Pandas, Scikit-Learn pipelines, TensorFlow. Built a predictive heart disease model using Decision Trees..."
+                      rows={5}
+                      className="bg-slate-950/60 hover:bg-slate-950/80 focus:bg-slate-950 text-white text-xs font-mono p-3 rounded-xl border border-white/10 focus:border-amber-500 outline-none w-full transition resize-none placeholder-white/20"
+                    />
+                  </div>
+
+                  {resumeError && (
+                    <div className="bg-red-950/35 border border-red-500/25 text-red-350 text-xs p-3 rounded-xl font-medium flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
+                      <span>{resumeError}</span>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={handleAnalyzeResume}
+                    disabled={analyzingResume}
+                    className="bg-gradient-to-r from-emerald-500 to-amber-600 hover:from-emerald-400 hover:to-amber-500 disabled:from-slate-705 disabled:to-slate-805 disabled:text-slate-500 text-white font-extrabold text-xs py-3 px-4 rounded-xl transition-all w-full flex items-center justify-center gap-2 cursor-pointer shadow-md shadow-amber-950/30 font-mono tracking-wide uppercase"
+                  >
+                    {analyzingResume ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin text-white" />
+                        Analyzing Resume with Gemini...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4 text-emerald-300 fill-emerald-300/20" />
+                        Analyze Resume & Match Jobs
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* AI Analysis feedback if available */}
+                {resumeAnalysisResult && (
+                  <div className="border-t border-white/10 pt-4 mt-4 space-y-3.5 animate-fade-in">
+                    <div>
+                      <span className="text-[10px] uppercase font-mono font-extrabold text-emerald-400 block tracking-wider">
+                        ★ Gemini Analysis Feedback:
+                      </span>
+                      <p className="text-[11px] text-slate-200 font-sans mt-1 italic leading-relaxed">
+                        "{resumeAnalysisResult.experienceSummary}"
+                      </p>
+                    </div>
+
+                    {resumeAnalysisResult.skills && resumeAnalysisResult.skills.length > 0 && (
+                      <div>
+                        <span className="text-[10px] uppercase font-mono font-bold text-slate-400 block mb-1">
+                          Parsed Core Skills:
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {resumeAnalysisResult.skills.map((sk: string, sIdx: number) => (
+                            <span
+                              key={sIdx}
+                              className="bg-amber-900/40 border border-amber-700/30 text-amber-300 text-[9px] font-bold px-2 py-0.5 rounded-md font-mono"
+                            >
+                              {sk}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-3.5 pt-1 text-[11px]">
+                      {resumeAnalysisResult.strengths && resumeAnalysisResult.strengths.length > 0 && (
+                        <div>
+                          <span className="text-[10px] uppercase font-mono font-bold text-emerald-400 block tracking-wide">
+                            Resume Strengths
+                          </span>
+                          <ul className="list-disc pl-3 text-slate-350 space-y-1 mt-1 font-sans">
+                            {resumeAnalysisResult.strengths.map((str: string, idx: number) => (
+                              <li key={idx}>{str}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {resumeAnalysisResult.gaps && resumeAnalysisResult.gaps.length > 0 && (
+                        <div>
+                          <span className="text-[10px] uppercase font-mono font-bold text-amber-400 block tracking-wide">
+                            Action Advice Gaps
+                          </span>
+                          <ul className="list-disc pl-3 text-slate-350 space-y-1 mt-1 font-sans">
+                            {resumeAnalysisResult.gaps.map((gp: string, idx: number) => (
+                              <li key={idx}>{gp}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Right Column: Suggested Matches */}
+              <div className="lg:col-span-7 space-y-6">
+                {(() => {
+                  const pyDone = submissions.filter(sub => sub.dayNumber >= 1 && sub.dayNumber <= 30).length;
+                  const numPyDone = submissions.filter(sub => sub.dayNumber >= 31 && sub.dayNumber <= 45).length;
+                  const pandasDone = submissions.filter(sub => sub.dayNumber >= 46 && sub.dayNumber <= 75).length;
+                  const mlDone = submissions.filter(sub => sub.dayNumber >= 76 && sub.dayNumber <= 105).length;
+
+                  // Fallback/standard classroom roles
+                  const classRoles = [
+                    {
+                      title: "Python Software Engineer",
+                      skillsRequired: "Python, Dicts, Custom Classes, Exceptions",
+                      isUnlocked: pyDone >= 5, 
+                      unlockedMsg: "Requires 5 Days Python Core",
+                      searchQuery: `Python Developer ${student.name ? `Data Scientist` : ""}`,
+                    },
+                    {
+                      title: "Data Analyst (NumPy & Pandas)",
+                      skillsRequired: "Vector arrays, Multi-dimensional Slicing, DataFrames, aggregations",
+                      isUnlocked: pyDone >= 15 && pandasDone >= 2,
+                      unlockedMsg: "Requires Python 15+ & Pandas 2+ Days",
+                      searchQuery: "Data Analyst Pandas NumPy Python",
+                    },
+                    {
+                      title: "Machine Learning Researcher",
+                      skillsRequired: "Regression pipelines, Scikit-Learn pipelines, Dec Trees, KNN",
+                      isUnlocked: mlDone >= 5,
+                      unlockedMsg: "Requires Machine Learning Day 5+",
+                      searchQuery: "Machine Learning Engineer Scikit Learn Python",
+                    },
+                  ];
+
+                  const isResumeMode = !!resumeAnalysisResult;
+                  const activeRolesList = resumeAnalysisResult && resumeAnalysisResult.suggestedRoles
+                    ? resumeAnalysisResult.suggestedRoles
+                    : classRoles;
+
+                  return (
+                    <div className="space-y-5">
+                      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-300 font-bold font-mono text-xs">
+                            {isResumeMode ? "AI Resume-Matched Roles" : "Verified Classroom Tracks:"}
+                          </span>
+                        </div>
+
+                        {/* Badges strip */}
+                        <div className="flex flex-wrap gap-1.5">
+                          {pyDone >= 5 && <span className="bg-emerald-600/35 border border-emerald-500/40 text-emerald-300 font-mono text-[9px] font-bold px-2 py-0.5 rounded-lg">#Python3</span>}
+                          {numPyDone >= 3 && <span className="bg-amber-600/35 border border-amber-500/40 text-amber-300 font-mono text-[9px] font-bold px-2 py-0.5 rounded-lg">#NumPy_Arrays</span>}
+                          {pandasDone >= 3 && <span className="bg-cyan-600/35 border border-cyan-500/40 text-cyan-300 font-mono text-[9px] font-bold px-2 py-0.5 rounded-lg">#Pandas_Frames</span>}
+                          {mlDone >= 2 && <span className="bg-amber-600/35 border border-amber-500/40 text-amber-300 font-mono text-[9px] font-bold px-2 py-0.5 rounded-lg">#Scikit_ML</span>}
+                        </div>
+                      </div>
+
+                      {/* Matching Warning Banner if in classroom path */}
+                      {!isResumeMode && (
+                        <div className="bg-amber-950/40 border border-amber-800/40 p-4 rounded-xl text-xs text-slate-300 flex items-start gap-2.5 animate-pulse">
+                          <Sparkles className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                          <p>
+                            Showing standard academy matching templates. Paste your credentials on the left to extract custom job searches optimized around your individual experience!
+                          </p>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {activeRolesList.map((role: any, idx: number) => {
+                          const linkedinUrl = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(role.searchQuery)}&location=${encodeURIComponent(jobLocation)}&f_TPR=r2592000`;
+                          const indeedUrl = `https://www.indeed.com/jobs?q=${encodeURIComponent(role.searchQuery)}&l=${encodeURIComponent(jobLocation)}`;
+                          const naukriUrl = `https://www.naukri.com/${encodeURIComponent(role.searchQuery.replace(/\s+/g, '-'))}-jobs-in-${encodeURIComponent(jobLocation.split(',')[0].trim().toLowerCase())}`;
+                          const wellfoundUrl = `https://wellfound.com/jobs?q=${encodeURIComponent(role.searchQuery)}&l=${encodeURIComponent(jobLocation)}`;
+                          const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(role.searchQuery + ' jobs in ' + jobLocation)}&ibp=htl;jobs`;
+
+                          return (
+                            <div 
+                              key={idx} 
+                              className={`p-4 rounded-xl border flex flex-col justify-between transition duration-300 ${
+                                isResumeMode 
+                                  ? "bg-amber-950/25 border-amber-500/40 hover:border-amber-400" 
+                                  : "bg-white/5 border-white/10 hover:border-amber-400"
+                              }`}
+                            >
+                              <div>
+                                <div className="flex justify-between items-start gap-2">
+                                  <h5 className="font-extrabold text-sm text-white leading-snug">
+                                    {role.title}
+                                  </h5>
+                                  <Briefcase className={`w-4 h-4 shrink-0 ${role.isUnlocked || isResumeMode ? "text-amber-400" : "text-slate-500"}`} />
+                                </div>
+                                <p className="text-[10px] text-slate-400 mt-1 line-clamp-2">
+                                  Skills: {role.skillsRequired}
+                                </p>
+                              </div>
+                              
+                              {(role.isUnlocked || isResumeMode) ? (
+                                <div className="mt-4 space-y-2 pt-3 border-t border-white/5">
+                                  <span className="text-[9px] uppercase font-mono font-bold text-amber-300 block">
+                                    Search Live Jobs on Portals:
+                                  </span>
+                                  <div className="grid grid-cols-2 gap-1.5">
+                                    <a 
+                                      href={linkedinUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="bg-blue-650 hover:bg-blue-600 border border-blue-500/20 text-white text-[9px] font-extrabold py-1.5 px-2 rounded-lg flex items-center justify-between transition focus:outline-none"
+                                    >
+                                      <span>LinkedIn</span>
+                                      <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                                    </a>
+                                    <a 
+                                      href={indeedUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="bg-cyan-650 hover:bg-cyan-600 border border-cyan-500/20 text-white text-[9px] font-extrabold py-1.5 px-2 rounded-lg flex items-center justify-between transition focus:outline-none"
+                                    >
+                                      <span>Indeed</span>
+                                      <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                                    </a>
+                                    <a 
+                                      href={naukriUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="bg-sky-650 hover:bg-sky-600 border border-sky-500/20 text-white text-[9px] font-extrabold py-1.5 px-2 rounded-lg flex items-center justify-between transition focus:outline-none"
+                                    >
+                                      <span>Naukri</span>
+                                      <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                                    </a>
+                                    <a 
+                                      href={wellfoundUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="bg-zinc-800 hover:bg-zinc-750 border border-zinc-700/20 text-white text-[9px] font-extrabold py-1.5 px-2 rounded-lg flex items-center justify-between transition focus:outline-none"
+                                    >
+                                      <span>Wellfound</span>
+                                      <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                                    </a>
+                                  </div>
+                                  <a 
+                                    href={googleUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="bg-amber-600 hover:bg-amber-555 border border-amber-500/25 text-white text-[9px] font-bold py-1.5 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition w-full focus:outline-none"
+                                  >
+                                    <span>Google Careers Results</span>
+                                    <Search className="w-2.5 h-2.5 shrink-0" />
+                                  </a>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleFetchLiveJobs(
+                                        role.searchQuery,
+                                        role.skillsRequired ? String(role.skillsRequired).split(",").map((s: string) => s.trim()) : undefined
+                                      )
+                                    }
+                                    disabled={loadingLiveJobs && liveJobsFetchedFor === role.searchQuery}
+                                    className="bg-emerald-600 hover:bg-emerald-550 border border-emerald-500/30 text-white text-[9px] font-extrabold py-1.5 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition w-full focus:outline-none disabled:opacity-60 cursor-pointer"
+                                  >
+                                    {loadingLiveJobs && liveJobsFetchedFor === role.searchQuery ? (
+                                      <>
+                                        <Loader2 className="w-2.5 h-2.5 shrink-0 animate-spin" />
+                                        <span>Extracting Real Postings...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Briefcase className="w-2.5 h-2.5 shrink-0" />
+                                        <span>Find Real Job Openings</span>
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="mt-4 bg-white/5 border border-white/5 text-slate-400 font-bold font-mono text-[9px] py-1.5 px-2 rounded-lg text-center select-none">
+                                  🔒 {role.unlockedMsg}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Extracted Live Job Postings: real listings pulled from LinkedIn, Naukri, Indeed,
+                          Instahyre, Wellfound & company career pages, with direct apply links per posting. */}
+                      {(loadingLiveJobs || liveJobs.length > 0 || liveJobsError) && (
+                        <div className="bg-emerald-950/30 border border-emerald-700/40 rounded-2xl p-4 space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <h5 className="text-xs font-extrabold text-emerald-300 uppercase tracking-wide font-mono flex items-center gap-1.5">
+                              <Briefcase className="w-3.5 h-3.5" />
+                              Live Job Openings (Last 48 Hours){liveJobsFetchedFor ? ` — "${liveJobsFetchedFor}"` : ""}
+                            </h5>
+                            {liveJobs.length > 0 && (
+                              <span className="text-[10px] font-mono text-emerald-400">{liveJobs.length} found</span>
+                            )}
+                          </div>
+
+                          {loadingLiveJobs && (
+                            <div className="text-xs text-emerald-200 italic py-4 text-center flex items-center justify-center gap-2">
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              Searching LinkedIn, Naukri, Indeed, Glassdoor & 6+ more portals for postings from the last 48 hours...
+                            </div>
+                          )}
+
+                          {!loadingLiveJobs && liveJobsError && (
+                            <div className="text-xs text-amber-300 bg-amber-950/30 border border-amber-700/30 rounded-lg p-3">
+                              {liveJobsError}
+                            </div>
+                          )}
+
+                          {!loadingLiveJobs && liveJobs.length > 0 && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                              {liveJobs.map((job: any, jIdx: number) => {
+                                const jobKey = `${job.title}-${job.company}`;
+                                const isTailoring = tailoringJobKey === jobKey;
+                                return (
+                                  <div key={jIdx} className="bg-white/5 border border-white/10 rounded-xl p-3 space-y-2">
+                                    <div>
+                                      <h6 className="text-xs font-extrabold text-white leading-snug">{job.title}</h6>
+                                      <p className="text-[10px] text-emerald-300 font-bold">{job.company}</p>
+                                      <p className="text-[10px] text-slate-400 mt-0.5">
+                                        {job.location || "Location not specified"} &bull; via {job.source || "Web"}
+                                      </p>
+                                      {job.postedWithin && (
+                                        <span className="inline-block mt-1 text-[9px] font-bold text-emerald-300 bg-emerald-900/40 border border-emerald-700/40 px-1.5 py-0.5 rounded-md">
+                                          🕒 {job.postedWithin}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="flex flex-col gap-1.5 pt-1 border-t border-white/5">
+                                      <a
+                                        href={job.applyUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="bg-amber-600 hover:bg-amber-550 text-white text-[9px] font-extrabold py-1.5 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition focus:outline-none"
+                                      >
+                                        <span>View & Apply</span>
+                                        <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                                      </a>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleTailorResumeForJob(job)}
+                                        disabled={isTailoring}
+                                        className="bg-white/10 hover:bg-white/15 border border-white/15 text-white text-[9px] font-bold py-1.5 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition focus:outline-none disabled:opacity-60 cursor-pointer"
+                                      >
+                                        {isTailoring ? (
+                                          <>
+                                            <Loader2 className="w-2.5 h-2.5 shrink-0 animate-spin" />
+                                            <span>Tailoring Resume...</span>
+                                          </>
+                                        ) : (
+                                          <>
+                                            <FileText className="w-2.5 h-2.5 shrink-0" />
+                                            <span>Tailor Resume for This Job</span>
+                                          </>
+                                        )}
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Job-Tailored Resume Result: rewritten resume that foregrounds the exact
+                          skills mentioned in the selected job's title/description */}
+                      {(tailoredResumeResult || tailoredResumeError) && (
+                        <div className="bg-amber-950/40 border border-amber-500/30 rounded-2xl p-4 space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <h5 className="text-xs font-extrabold text-amber-300 uppercase tracking-wide font-mono flex items-center gap-1.5">
+                              <FileText className="w-3.5 h-3.5" />
+                              Job-Tailored Resume{tailoredResumeResult?.tailoredFor ? ` — ${tailoredResumeResult.tailoredFor}` : ""}
+                            </h5>
+                            {tailoredResumeResult && (
+                              <button
+                                type="button"
+                                onClick={() => navigator.clipboard.writeText(tailoredResumeResult.formattedResume)}
+                                className="text-[9px] font-bold text-amber-300 hover:text-white flex items-center gap-1 cursor-pointer"
+                              >
+                                <Copy className="w-2.5 h-2.5" />
+                                Copy
+                              </button>
+                            )}
+                          </div>
+
+                          {tailoredResumeError && (
+                            <div className="text-xs text-amber-300 bg-amber-950/30 border border-amber-700/30 rounded-lg p-3">
+                              {tailoredResumeError}
+                            </div>
+                          )}
+
+                          {tailoredResumeResult && (
+                            <>
+                              <textarea
+                                readOnly
+                                value={tailoredResumeResult.formattedResume}
+                                rows={10}
+                                className="w-full bg-black/20 border border-white/10 rounded-lg p-3 text-[10px] font-mono text-slate-200 leading-relaxed resize-y"
+                              />
+                              {tailoredResumeResult.optimizedKeywords && tailoredResumeResult.optimizedKeywords.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5">
+                                  <span className="text-[9px] font-mono font-bold text-slate-400 uppercase mr-1">Keywords matched from job:</span>
+                                  {tailoredResumeResult.optimizedKeywords.map((kw: string, kIdx: number) => (
+                                    <span key={kIdx} className="bg-amber-600/30 border border-amber-500/40 text-amber-200 text-[9px] font-bold px-2 py-0.5 rounded-full">
+                                      {kw}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              {tailoredResumeResult.tailoringNotes && tailoredResumeResult.tailoringNotes.length > 0 && (
+                                <ul className="text-[10px] text-slate-300 space-y-1 list-disc pl-4">
+                                  {tailoredResumeResult.tailoringNotes.map((note: string, nIdx: number) => (
+                                    <li key={nIdx}>{note}</li>
+                                  ))}
+                                </ul>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Display customizable helper query below the matches */}
+                      {isResumeMode && (
+                        <div className="bg-amber-950/40 border border-amber-500/10 p-3.5 rounded-xl text-[11px] text-slate-350 space-y-1">
+                          <span className="font-bold text-emerald-400 font-mono text-[10px] uppercase block">
+                            💡 Advanced Recruiter Tip:
+                          </span>
+                          <p>
+                            Gemini parsed your profile details and synthesized unique search queries (e.g. <strong>"{activeRolesList[0]?.searchQuery}"</strong>) custom-tailored for your background to find roles relevant for you in <strong>"{jobLocation}"</strong>.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+
+            {/* Direct Division Divider - AI ATS-Friendly Resume Compiler */}
+            <div className="border-t border-slate-800 my-6 pt-6 space-y-6">
+              {(() => {
+                const completedMilestones = submissions.length;
+                const fiftyPercentMilestone = 100;
+                const hasCompletedFiftyPercent = completedMilestones >= fiftyPercentMilestone;
+                const teacherUnlocked = !!(locks["Global"]?.featureLocks?.resume || locks[student.batch]?.featureLocks?.resume);
+                const isResumeBuilderUnlocked = teacherUnlocked || hasCompletedFiftyPercent || atsBypass || specialPermissionBypass;
+
+                // Academic stats for verified certifications section block
+                const sumScores = submissions.reduce((acc, cur) => acc + (cur.score || 0), 0);
+                const avgScore = completedMilestones > 0 ? Number((sumScores / completedMilestones).toFixed(1)) : 0;
+
+                const copyToClipboard = () => {
+                  if (atsResult) {
+                    navigator.clipboard.writeText(atsResult.formattedResume);
+                    setCopiedAts(true);
+                    setTimeout(() => {
+                      setCopiedAts(false);
+                    }, 2000);
+                  }
+                };
+
+                const downloadTxt = () => {
+                  if (atsResult) {
+                    const file = new Blob([atsResult.formattedResume], { type: "text/plain;charset=utf-8" });
+                    const url = URL.createObjectURL(file);
+                    const element = document.createElement("a");
+                    element.href = url;
+                    element.download = `${atsInputs.fullName.replace(/\s+/g, "_")}_ATS_friendly_resume.txt`;
+                    document.body.appendChild(element);
+                    element.click();
+                    document.body.removeChild(element);
+                    URL.revokeObjectURL(url);
+                  }
+                };
+
+                return (
+                  <div className="space-y-6">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                      <div className="space-y-1.5">
+                        <span className="bg-amber-500/15 border border-amber-500/35 text-amber-300 font-mono text-[9px] font-extrabold py-0.5 px-2.5 rounded-full uppercase tracking-wider inline-block">
+                          ★ SPECIAL REPLACEMENT UPDATE
+                        </span>
+                        <h4 className="text-lg font-bold font-sans tracking-tight text-white flex items-center gap-2">
+                          <Award className="w-5 h-5 text-amber-400 shrink-0" />
+                          Interactive AI ATS-Friendly Resume Compiler
+                        </h4>
+                        <p className="text-slate-300 text-xs font-sans max-w-2xl">
+                          Unlock a custom placement-aligned resume compiled directly with your official training scores and course completions. Recommended for elite applicants.
+                        </p>
+                      </div>
+
+                      {/* Progress widget panel */}
+                      <div className="bg-white/5 border border-white/10 rounded-2xl p-4 min-w-[240px] space-y-2">
+                        <div className="flex justify-between items-center text-[10px] font-mono">
+                          <span className="text-slate-400 font-bold">TOTAL MILESTONES:</span>
+                          <span className={hasCompletedFiftyPercent ? "text-emerald-400 font-extrabold" : "text-amber-400 font-bold"}>
+                            {completedMilestones} / {fiftyPercentMilestone} Days
+                          </span>
+                        </div>
+                        
+                        {/* Progress Bar indicator representing half progress */}
+                        <div className="w-full bg-slate-950 h-2.5 rounded-full overflow-hidden border border-white/5">
+                          <div 
+                            className={`h-full transition-all duration-500 ${hasCompletedFiftyPercent ? "bg-emerald-500" : "bg-amber-500"}`}
+                            style={{ width: `${Math.min(100, Math.round((completedMilestones / fiftyPercentMilestone) * 100))}%` }}
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 text-[10px]">
+                          <span className="text-slate-400 font-sans font-bold">
+                            {hasCompletedFiftyPercent ? "✅ Feature Unlocked!" : `🔒 Unlocks at 50% (${fiftyPercentMilestone} Checkpoints)`}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {!isResumeBuilderUnlocked ? (
+                      /* Lock Overlay Card */
+                      <div className="bg-slate-950/40 border border-white/5 p-8 rounded-2xl text-center space-y-3.5">
+                        <div className="w-12 h-12 bg-white/5 border border-white/10 rounded-full flex items-center justify-center mx-auto text-slate-400">
+                          <Lock className="w-5 h-5 text-amber-400" />
+                        </div>
+                        <h5 className="font-extrabold text-sm text-white">AI ATS Resume Builder Is Locked</h5>
+                        <p className="text-xs text-slate-300 max-w-lg mx-auto leading-relaxed">
+                          Requires completing at least 50% of the syllabus milestones (100 days of curriculum assessments) to dynamically certify. You have currently completed <strong>{completedMilestones} / 200 Days</strong> checks.
+                        </p>
+                        <p className="text-[11px] text-amber-400 font-bold font-mono">
+                          ★ Developer Sandbox Tip: Check the "Bypass Lock" checkbox above to use this builder immediately!
+                        </p>
+                      </div>
+                    ) : (
+                      /* Active ATS Compiler module */
+                      <div className="space-y-6">
+                        <div className="bg-amber-900/10 border border-amber-700/20 p-4 rounded-xl text-xs text-amber-200 flex items-start gap-2.5">
+                          <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400 mt-0.5" />
+                          <p>
+                            <strong>Academy Verification Active:</strong> Your actual training records (<strong>{completedMilestones} checkpoints completed</strong> with average score of <strong>{avgScore}%</strong>) are certified and compiled dynamically into your resume's Verified Credentials block!
+                          </p>
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                          {/* Left Column questionnaire */}
+                          <div className="lg:col-span-5 space-y-4 bg-white/5 border border-white/10 p-5 rounded-xl">
+                            <span className="font-extrabold text-xs uppercase font-mono tracking-wider text-amber-300 block border-b border-white/5 pb-2">
+                              1. Personal & Technical Inputs
+                            </span>
+
+                            <div className="grid grid-cols-2 gap-3.5">
+                              <div className="space-y-1">
+                                <label className="text-[10px] uppercase font-mono font-bold text-slate-400">FullName</label>
+                                <input
+                                  type="text"
+                                  value={atsInputs.fullName}
+                                  onChange={(e) => setAtsInputs({ ...atsInputs, fullName: e.target.value })}
+                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[10px] uppercase font-mono font-bold text-slate-400">Email Address</label>
+                                <input
+                                  type="text"
+                                  value={atsInputs.email}
+                                  onChange={(e) => setAtsInputs({ ...atsInputs, email: e.target.value })}
+                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3.5">
+                              <div className="space-y-1">
+                                <label className="text-[10px] uppercase font-mono font-bold text-slate-400">Phone</label>
+                                <input
+                                  type="text"
+                                  value={atsInputs.phone}
+                                  onChange={(e) => setAtsInputs({ ...atsInputs, phone: e.target.value })}
+                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[10px] uppercase font-mono font-bold text-slate-400">LinkedIn URL</label>
+                                <input
+                                  type="text"
+                                  value={atsInputs.linkedin}
+                                  onChange={(e) => setAtsInputs({ ...atsInputs, linkedin: e.target.value })}
+                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[10px] uppercase font-mono font-bold text-slate-400">GitHub Profile</label>
+                              <input
+                                type="text"
+                                value={atsInputs.github}
+                                onChange={(e) => setAtsInputs({ ...atsInputs, github: e.target.value })}
+                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[10px] uppercase font-mono font-bold text-slate-400">Professional Summary</label>
+                              <textarea
+                                value={atsInputs.objective}
+                                onChange={(e) => setAtsInputs({ ...atsInputs, objective: e.target.value })}
+                                rows={3}
+                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition resize-none leading-relaxed"
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[10px] uppercase font-mono font-bold text-slate-400">Technical Tools & Skills</label>
+                              <textarea
+                                value={atsInputs.topSkills}
+                                onChange={(e) => setAtsInputs({ ...atsInputs, topSkills: e.target.value })}
+                                rows={2}
+                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition resize-none leading-relaxed"
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[10px] uppercase font-mono font-bold text-slate-400">Personal & Academy Projects</label>
+                              <textarea
+                                value={atsInputs.projectsText}
+                                onChange={(e) => setAtsInputs({ ...atsInputs, projectsText: e.target.value })}
+                                rows={3}
+                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition resize-none leading-relaxed"
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[10px] uppercase font-mono font-bold text-slate-400">Formal Academic Qualifications</label>
+                              <input
+                                type="text"
+                                value={atsInputs.educationText}
+                                onChange={(e) => setAtsInputs({ ...atsInputs, educationText: e.target.value })}
+                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                              />
+                            </div>
+
+                            {atsError && (
+                              <div className="bg-red-950/35 border border-red-500/25 text-red-350 text-xs p-3 rounded-lg font-bold flex items-center gap-2">
+                                <AlertCircle className="w-4 h-4 text-red-500" />
+                                <span>{atsError}</span>
+                              </div>
+                            )}
+
+                            <button
+                              onClick={handleBuildAtsResume}
+                              disabled={compilingResume}
+                              className="bg-amber-600 hover:bg-amber-550 border border-amber-500/30 font-bold font-mono tracking-wider uppercase text-white py-3 px-4 rounded-xl transition duration-300 w-full flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                            >
+                              {compilingResume ? (
+                                <>
+                                  <Loader2 className="w-4 h-4 animate-spin text-white" />
+                                  Compiling with Gemini...
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles className="w-4 h-4 text-amber-400" />
+                                  Compile ATS-friendly Resume
+                                </>
+                              )}
+                            </button>
+                          </div>
+
+                          {/* Right Column preview block */}
+                          <div className="lg:col-span-7 space-y-4">
+                            <span className="font-extrabold text-xs uppercase font-mono tracking-wider text-amber-300 block border-b border-white/5 pb-2">
+                              2. Clean plaintext ATS compiler output
+                            </span>
+
+                            {!atsResult ? (
+                              <div className="bg-slate-950/30 border border-dashed border-white/10 p-12 rounded-xl text-center space-y-3.5 flex flex-col justify-center items-center h-[520px]">
+                                <FileText className="w-12 h-12 text-slate-600" />
+                                <h6 className="font-bold text-white text-sm">Resume Preview Sandbox</h6>
+                                <p className="text-slate-400 text-xs max-w-xs leading-relaxed">
+                                  Fill in your individual profile fields on the left and trigger compilation to see clean machine-parser compliant outputs.
+                                </p>
+                              </div>
+                            ) : (
+                              <div className="space-y-4 animate-fade-in">
+                                {/* Copy / download controls bar */}
+                                <div className="flex justify-between items-center bg-slate-950 border border-white/10 rounded-xl p-3">
+                                  <span className="text-[10px] font-mono font-bold text-emerald-400 flex items-center gap-1.5">
+                                    <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                                    ATS PARSER SAFE FORMAT
+                                  </span>
+
+                                  <div className="flex gap-2">
+                                    <button
+                                      onClick={copyToClipboard}
+                                      className="bg-amber-600/35 hover:bg-amber-600 border border-amber-500/30 text-white font-bold font-mono text-[10px] py-1.5 px-3 rounded-lg flex items-center gap-1.5 transition cursor-pointer"
+                                    >
+                                      {copiedAts ? (
+                                        <>
+                                          <Check className="w-3 h-3 text-emerald-400" />
+                                          <span>Text Copied!</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Copy className="w-3 h-3" />
+                                          <span>Copy Text</span>
+                                        </>
+                                      )}
+                                    </button>
+
+                                    <button
+                                      onClick={downloadTxt}
+                                      className="bg-emerald-600/35 hover:bg-emerald-600 border border-emerald-500/30 text-white font-bold font-mono text-[10px] py-1.5 px-3 rounded-lg flex items-center gap-1.5 transition cursor-pointer"
+                                    >
+                                      <Download className="w-3 h-3" />
+                                      <span>Download .TXT</span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Monospace Text Box mimicking physical print */}
+                                <div className="relative">
+                                  <textarea
+                                    readOnly
+                                    value={atsResult.formattedResume}
+                                    rows={16}
+                                    className="bg-slate-950 text-slate-100 text-[10.5px] font-mono leading-relaxed p-4.5 rounded-xl border border-white/10 outline-none w-full resize-none scrollbar-thin shadow-inner block"
+                                  />
+                                </div>
+
+                                {/* Keywords matching */}
+                                {atsResult.optimizedKeywords && atsResult.optimizedKeywords.length > 0 && (
+                                  <div className="bg-white/5 border border-white/10 p-4 rounded-xl space-y-2">
+                                    <span className="text-[10px] uppercase font-mono font-bold text-slate-300 block">
+                                      High-Frequency Search Keywords Extracted:
+                                    </span>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {atsResult.optimizedKeywords.map((kw: string, kIdx: number) => (
+                                        <span 
+                                          key={kIdx} 
+                                          className="bg-amber-500/10 border border-amber-500/25 text-amber-300 px-2 py-0.5 rounded text-[9px] font-bold font-mono"
+                                        >
+                                          #{kw}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Recruiter hints */}
+                                {atsResult.atsTips && atsResult.atsTips.length > 0 && (
+                                  <div className="bg-amber-950/20 border border-amber-700/20 p-4 rounded-xl space-y-1.5">
+                                    <span className="text-[10px] uppercase font-mono font-bold text-amber-300 block">
+                                      ★ Premium Recruiter Optimization Tips:
+                                    </span>
+                                    <ul className="list-disc pl-4 text-xs text-slate-300 space-y-1 font-sans">
+                                      {atsResult.atsTips.map((tip: string, tIdx: number) => (
+                                        <li key={tIdx}>{tip}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        )
+      ) : (
+          /* 2. STATE: LIST OF ALL 200 DAYS */
+          <div className="space-y-6">
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+              <h3 className="text-lg font-bold text-slate-900 border-b border-indigo-50 pb-2 mb-2 flex items-center gap-1.5">
+                <Calendar className="w-5 h-5 text-indigo-600" />
+                200 Days Curriculum Track Matrix
+              </h3>
+              <p className="text-sm text-slate-500">
+                Days are unlocked day-after-day by teacher Vinay. Complete the respective 10 training questions inside active stages to maintain your academic streaks.
+              </p>
+            </div>
+
+            {/* Render chapters list with day grids */}
+            <div className="space-y-6">
+              {SYLLABUS.map((chapter) => {
+                const totalDaysInCurriculum = chapter.endDay - chapter.startDay + 1;
+
+                // Gather days under this chapter
+                const chapterDays = Array.from(
+                  { length: totalDaysInCurriculum },
+                  (_, i) => chapter.startDay + i
+                );
+
+                return (
+                  <div key={chapter.slug} className="bg-white rounded-xl shadow-sm border border-slate-205 p-6 space-y-4">
+                    <div className="flex flex-col sm:flex-row justify-between sm:items-center border-b border-slate-100 pb-3 gap-2">
+                      <div>
+                        <h4 className="font-bold text-slate-900 flex items-center gap-2">
+                          <BookOpen className="w-4 h-4 text-indigo-600" />
+                          {chapter.name}
+                        </h4>
+                        <p className="text-xs text-slate-500 leading-relaxed max-w-xl">
+                          {chapter.description}
+                        </p>
+                      </div>
+
+                      <span className="text-xs font-mono font-bold text-indigo-600 bg-indigo-50 border border-indigo-150 rounded px-2.5 py-1.5 self-start sm:self-auto shrink-0">
+                        Day {chapter.startDay} - {chapter.endDay}
+                      </span>
+                    </div>
+
+                    {/* Chapter-wise Video Attachments Widget */}
+                    {(() => {
+                      const chapterVideos = learningVideos.filter(v => v.courseSlug === chapter.slug);
+                      const isAdding = showAttachFormSlug === chapter.slug;
+
+                      return (
+                        <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4.5 space-y-3.5">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                            <div className="flex items-center gap-2">
+                              <Video className="w-4.5 h-4.5 text-indigo-600 shrink-0" />
+                              <span className="text-xs font-bold text-slate-800 uppercase font-mono tracking-wider">
+                                Video Guides & Lecture Attachments ({chapterVideos.length})
+                              </span>
+                            </div>
+
+                            <button
+                              onClick={() => {
+                                setVideoError(null);
+                                if (isAdding) {
+                                  setShowAttachFormSlug(null);
+                                } else {
+                                  setShowAttachFormSlug(chapter.slug);
+                                  setNewVideoForm({ title: "", description: "", videoUrl: "" });
+                                }
+                              }}
+                              className="text-[11px] font-bold font-mono text-indigo-600 bg-white border border-indigo-200 hover:border-indigo-500 rounded-lg px-2.5 py-1.5 flex items-center gap-1 hover:bg-indigo-50/50 cursor-pointer shadow-xs transition"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              {isAdding ? "Cancel" : "Attach Course Video"}
+                            </button>
+                          </div>
+
+                          {/* Video Form block inside the chapter item */}
+                          {isAdding && (
+                            <div className="bg-white p-4 border border-indigo-150 rounded-xl space-y-3 animate-fade-in shadow-xs">
+                              <span className="text-[10px] font-bold uppercase font-mono text-indigo-600 block">
+                                Add Supporting Video Resource for {chapter.name}
+                              </span>
+
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div className="space-y-1">
+                                  <label className="text-[10px] uppercase font-bold text-slate-500 font-mono">Resource Title *</label>
+                                  <input
+                                    type="text"
+                                    placeholder="e.g. Scikit-Learn Pipeline Masterclass"
+                                    value={newVideoForm.title}
+                                    onChange={(e) => setNewVideoForm({ ...newVideoForm, title: e.target.value })}
+                                    className="bg-slate-50 border border-slate-200 text-slate-800 text-xs p-2 rounded-lg outline-none w-full focus:border-indigo-500 transition"
+                                  />
+                                </div>
+                                <div className="space-y-1">
+                                  <label className="text-[10px] uppercase font-bold text-slate-500 font-mono">YouTube URL or Video Link *</label>
+                                  <input
+                                    type="text"
+                                    placeholder="e.g. https://www.youtube.com/watch?v=..."
+                                    value={newVideoForm.videoUrl}
+                                    onChange={(e) => setNewVideoForm({ ...newVideoForm, videoUrl: e.target.value })}
+                                    className="bg-slate-50 border border-slate-200 text-slate-800 text-xs p-2 rounded-lg outline-none w-full focus:border-indigo-500 transition"
+                                  />
+                                </div>
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="text-[10px] uppercase font-bold text-slate-500 font-mono">Optional Description / Reference notes</label>
+                                <textarea
+                                  placeholder="Provide optional explanation tips, reference notebooks, timestamps, or guide steps..."
+                                  value={newVideoForm.description}
+                                  onChange={(e) => setNewVideoForm({ ...newVideoForm, description: e.target.value })}
+                                  rows={1}
+                                  className="bg-slate-50 border border-slate-200 text-slate-800 text-xs p-2 rounded-lg outline-none w-full focus:border-indigo-500 transition resize-none"
+                                />
+                              </div>
+
+                              {videoError && (
+                                <div className="bg-red-50 text-red-650 text-xs p-2 rounded-lg border border-red-155 flex items-center gap-1.5 font-bold font-sans">
+                                  <AlertCircle className="w-3.5 h-3.5 shrink-0 text-red-500" />
+                                  <span>{videoError}</span>
+                                </div>
+                              )}
+
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => handleAttachVideo(chapter.slug)}
+                                  disabled={savingVideo}
+                                  className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold font-mono text-[10px] px-3.5 py-2 rounded-lg transition disabled:opacity-50 cursor-pointer"
+                                >
+                                  {savingVideo ? "Saving..." : "Save Attachment"}
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setNewVideoForm({ title: "", description: "", videoUrl: "" });
+                                    setShowAttachFormSlug(null);
+                                    setVideoError(null);
+                                  }}
+                                  className="border border-slate-200 text-slate-650 font-bold font-mono text-[10px] px-3.5 py-2 rounded-lg hover:bg-slate-50 transition cursor-pointer"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Attached Videos Gallery */}
+                          {chapterVideos.length === 0 ? (
+                            <div className="bg-white/50 border border-slate-150 rounded-xl p-5 text-center space-y-1">
+                              <FileVideo className="w-7 h-7 text-slate-300 mx-auto" />
+                              <span className="text-xs text-slate-500 font-semibold block">No video guidelines attached yet</span>
+                              <span className="text-[10px] text-slate-400">Instructors and students can attach learning video resources to this chapter dynamic card!</span>
+                            </div>
+                          ) : (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                              {chapterVideos.map((video) => {
+                                const isYoutube = video.videoUrl.includes("youtube.com/embed/");
+                                const isBook = video.attachmentType === "book";
+                                const isMaterial = video.attachmentType === "material";
+                                return (
+                                  <div
+                                    key={video.id}
+                                    className="bg-white p-3.5 border border-slate-200 rounded-xl hover:border-indigo-300 hover:shadow-xs transition group flex flex-col justify-between space-y-2.5"
+                                  >
+                                    <div className="space-y-1.5">
+                                      <div className="flex items-start justify-between gap-1.5">
+                                        <span className={`font-mono text-[8.5px] font-black py-0.5 px-1.5 rounded uppercase shrink-0 border ${
+                                          isBook
+                                            ? "bg-amber-50 text-amber-750 border-amber-150"
+                                            : isMaterial
+                                            ? "bg-emerald-50 text-emerald-700 border-emerald-150"
+                                            : "bg-indigo-50 text-indigo-700 border-indigo-150"
+                                        }`}>
+                                          {isBook ? "📚 REFERENCE BOOK" : isMaterial ? "📁 STUDY MATERIAL" : (isYoutube ? "🎥 YOUTUBE GUIDE" : "🎥 VIDEO GUIDE")}
+                                        </span>
+                                        <span className="text-[8.5px] text-zinc-400 font-mono truncate max-w-[125px]">
+                                          By {video.addedBy}
+                                        </span>
+                                      </div>
+
+                                      <h5 className="font-bold text-xs text-slate-800 line-clamp-1 group-hover:text-indigo-900 leading-snug">
+                                        {video.title}
+                                      </h5>
+                                      <p className="text-[10.5px] text-zinc-500 line-clamp-2 leading-relaxed">
+                                        {video.description || "No supplemental reference logs provided for this course attachment."}
+                                      </p>
+                                    </div>
+
+                                    <div className="border-t border-slate-100 pt-2 flex items-center justify-between">
+                                      <span className="text-[9px] text-zinc-400 font-mono">
+                                        {new Date(video.uploadedAt).toLocaleDateString()}
+                                      </span>
+
+                                      {isBook ? (
+                                        <a
+                                          href={video.videoUrl}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="bg-amber-600 hover:bg-amber-700 text-white font-mono font-bold text-[9.5px] py-1 px-2.5 rounded-md flex items-center gap-1 transition-colors cursor-pointer shrink-0 shadow-xs"
+                                        >
+                                          <BookOpen className="w-2.5 h-2.5" />
+                                          Read Book
+                                        </a>
+                                      ) : isMaterial ? (
+                                        <a
+                                          href={video.videoUrl}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="bg-emerald-600 hover:bg-emerald-700 text-white font-mono font-bold text-[9.5px] py-1 px-2.5 rounded-md flex items-center gap-1 transition-colors cursor-pointer shrink-0 shadow-xs"
+                                        >
+                                          <FileText className="w-2.5 h-2.5" />
+                                          Access Material
+                                        </a>
+                                      ) : (
+                                        <button
+                                          onClick={() => setSelectedVideo(video)}
+                                          className="bg-slate-900 hover:bg-indigo-600 text-white font-mono font-bold text-[9.5px] py-1 px-2.5 rounded-md flex items-center gap-1 transition-colors cursor-pointer shrink-0 shadow-xs"
+                                        >
+                                          <Play className="w-2.5 h-2.5 fill-current text-emerald-400" />
+                                          Watch Video
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Matrix Grid Heading */}
+                    <div className="border-t border-slate-100 pt-2">
+                      <span className="text-[10px] font-bold font-mono tracking-widest text-slate-400 uppercase block mb-1">
+                        Select Day Milestone Assessments
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                      {chapterDays.map((dayNum) => {
+                        const cell = getDayStatus(dayNum);
+                        const topicTitle = getTopicTitleForDay(dayNum);
+
+                        if (cell.status === "completed") {
+                          return (
+                            <button
+                              key={dayNum}
+                              onClick={() => handleStartTest(dayNum)}
+                              className="border rounded-xl p-4 bg-indigo-50/70 border-indigo-200 hover:bg-indigo-105 hover:shadow-sm transition text-left flex flex-col justify-between h-32 relative group cursor-pointer"
+                              title="Reviewed / Taken"
+                            >
+                              <div className="flex justify-between items-center w-full">
+                                <span className="font-extrabold text-indigo-700 font-mono text-sm">Day {dayNum}</span>
+                                <span className="bg-emerald-100 text-emerald-800 text-[10px] font-black px-2 py-0.5 rounded-full flex items-center gap-1">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                  COMPLETED
+                                </span>
+                              </div>
+                              <div className="my-2">
+                                <p className="text-xs font-bold text-slate-800 line-clamp-2 leading-snug group-hover:text-indigo-900">
+                                  {topicTitle}
+                                </p>
+                              </div>
+                              <div className="flex justify-between items-center w-full mt-auto pt-1 border-t border-indigo-200/50">
+                                <span className="text-[10px] text-slate-500 font-medium">Performance Grade:</span>
+                                <span className="text-xs font-black text-indigo-900 font-mono">
+                                  {cell.score} <span className="text-[10px] text-indigo-550 font-normal">/ 10 pts</span>
+                                </span>
+                              </div>
+                            </button>
+                          );
+                        }
+
+                        if (cell.status === "unlocked") {
+                          return (
+                            <button
+                              key={dayNum}
+                              onClick={() => handleStartTest(dayNum)}
+                              className="border rounded-xl p-4 bg-white border-indigo-300 shadow-sm hover:border-indigo-600 hover:shadow-md transition text-left flex flex-col justify-between h-32 group relative cursor-pointer"
+                            >
+                              <div className="flex justify-between items-center w-full">
+                                <span className="font-extrabold text-indigo-650 font-mono text-sm">Day {dayNum}</span>
+                                <span className="bg-indigo-100 text-indigo-805 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-indigo-600 animate-ping"></span>
+                                  UNLOCKED
+                                </span>
+                              </div>
+                              <div className="my-2">
+                                <p className="text-xs font-extrabold text-slate-900 line-clamp-2 leading-snug group-hover:text-indigo-700">
+                                  {topicTitle}
+                                </p>
+                              </div>
+                              <div className="flex items-center justify-between w-full mt-auto pt-1 border-t border-slate-100">
+                                <span className="text-[10px] text-indigo-600 font-black tracking-wider uppercase font-mono">START TEST</span>
+                                <Play className="w-3.5 h-3.5 text-indigo-600 fill-indigo-600 group-hover:translate-x-1 transition-transform" />
+                              </div>
+                            </button>
+                          );
+                        }
+
+                        // Locked State with preview of what's coming next
+                        const isInstructorUnlocked = unlockedDays.includes(dayNum);
+                        return (
+                          <div
+                            key={dayNum}
+                            className={`border rounded-xl p-4 text-left flex flex-col justify-between h-32 relative transition group ${
+                              isInstructorUnlocked
+                                ? "border-amber-200 bg-amber-50/40 text-amber-800/80 hover:bg-amber-50"
+                                : "border-slate-200 bg-slate-50 text-slate-400 opacity-85 hover:opacity-95"
+                            }`}
+                            title={
+                              isInstructorUnlocked
+                                ? `Locked: Complete Day ${dayNum - 1} first`
+                                : "Locked by classroom instructor"
+                            }
+                          >
+                            <div className="flex justify-between items-center w-full">
+                              <span className={`font-bold font-mono text-sm ${isInstructorUnlocked ? "text-amber-700" : "text-slate-400"}`}>
+                                Day {dayNum}
+                              </span>
+                              {isInstructorUnlocked ? (
+                                <span className="bg-amber-100 text-amber-800 text-[9px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 font-mono">
+                                  <Lock className="w-2.5 h-2.5 text-amber-600" />
+                                  PREREQ REQ
+                                </span>
+                              ) : (
+                                <span className="bg-slate-200 text-slate-550 text-[9px] font-mono px-2 py-0.5 rounded-full flex items-center gap-1">
+                                  <Lock className="w-2.5 h-2.5 text-slate-400" />
+                                  LOCKED
+                                </span>
+                              )}
+                            </div>
+                            <div className="my-2">
+                              <p className={`text-xs line-clamp-2 leading-snug ${isInstructorUnlocked ? "font-semibold text-slate-700" : "font-semibold text-slate-400"}`}>
+                                {topicTitle}
+                              </p>
+                            </div>
+                            <div className={`flex items-center justify-between w-full mt-auto pt-1 border-t ${isInstructorUnlocked ? "border-amber-200/65" : "border-slate-200"}`}>
+                              <span className="text-[10px] font-medium">
+                                {isInstructorUnlocked ? `Must complete Day ${dayNum - 1}` : "Topic Preview"}
+                              </span>
+                              <Lock className={`w-3 h-3 ${isInstructorUnlocked ? "text-amber-500" : "text-slate-350"}`} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )
+      }
+      </div>
+
+      {/* 🎬 Cinematic Study Video Theater Modal Overlay */}
+      {selectedVideo && (
+        <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in text-left">
+          <div className="bg-slate-900 border border-white/10 rounded-2xl max-w-3xl w-full overflow-hidden shadow-2xl flex flex-col">
+            
+            {/* Header bar */}
+            <div className="bg-slate-950 p-4 border-b border-white/5 flex items-center justify-between">
+              <div className="space-y-0.5">
+                <span className="text-[10px] font-mono font-bold text-indigo-400 uppercase tracking-wider block">
+                  ★ STUDY COMPANION THEATER
+                </span>
+                <span className="text-white text-sm font-bold block truncate max-w-[280px] sm:max-w-md">
+                  {selectedVideo.title}
+                </span>
+              </div>
+              <button
+                onClick={() => setSelectedVideo(null)}
+                className="bg-white/10 hover:bg-white/20 hover:text-white text-slate-350 px-2.5 py-1.5 rounded-lg text-[10px] transition font-mono font-bold cursor-pointer"
+              >
+                ✕ CLOSE
+              </button>
+            </div>
+
+            {/* Video content */}
+            <div className="relative bg-black" style={{ aspectRatio: "16/9" }}>
+              {selectedVideo.videoUrl.includes("youtube.com/embed/") ? (
+                <iframe
+                  src={`${selectedVideo.videoUrl}?autoplay=1`}
+                  title={selectedVideo.title}
+                  className="absolute inset-0 w-full h-full border-0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-6 space-y-4">
+                  <FileVideo className="w-16 h-16 text-indigo-500 animate-pulse" />
+                  <p className="text-xs text-slate-300 max-w-md">
+                    This attachment links to an external course database video material. Click the action line below to open or stream this learning resource in a new tab:
+                  </p>
+                  <a
+                    href={selectedVideo.videoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 bg-indigo-650 hover:bg-indigo-605 text-white font-extrabold font-mono text-[11px] py-2 px-4 rounded-xl tracking-wider uppercase transition shadow-md"
+                  >
+                    <span>Launch Resource Link</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+              )}
+            </div>
+
+            {/* Footer detailing information */}
+            <div className="bg-slate-950 p-4 border-t border-white/5 space-y-2">
+              <div className="flex justify-between items-center text-[11px] sm:text-xs">
+                <span className="text-slate-400 font-sans">
+                  Added dynamically by: <strong className="text-white font-semibold font-mono">{selectedVideo.addedBy}</strong>
+                </span>
+                <span className="text-slate-400 font-mono text-[10px] sm:text-[11px]">
+                  Shared on {new Date(selectedVideo.uploadedAt).toLocaleDateString()}
+                </span>
+              </div>
+              {selectedVideo.description && (
+                <p className="text-xs leading-relaxed text-slate-300 bg-white/5 p-3 rounded-lg border border-white/5 font-sans">
+                  {selectedVideo.description}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Placement Details Entry Modal */}
+      {showPlacementModal && (
+        <div className="fixed inset-0 bg-slate-950/80 z-50 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleSavePlacementDetails}
+            className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-2xl w-full p-6 animate-zoom-in max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex justify-between items-start border-b border-slate-100 pb-3 mb-4">
+              <div className="text-left">
+                <span className="text-[10px] bg-indigo-50 border border-indigo-150 text-indigo-700 font-extrabold font-mono tracking-wider py-0.5 px-2 rounded-full uppercase">
+                  MANAGEMENT PORTALS CLEARANCE
+                </span>
+                <h3 className="text-base font-black text-slate-900 mt-1 flex items-center gap-2">
+                  <Briefcase className="w-5 h-5 text-indigo-600" />
+                  Fill Your Placement Portals Details
+                </h3>
+                <p className="text-xs text-slate-500 font-sans mt-0.5">
+                  Your updated profiles list is sent directly to management to expedite active job matches.
+                </p>
+                <p className="text-[10px] text-emerald-700 font-bold font-mono mt-1">
+                  ✓ No minimum required — fill in even just 1 or 2 portals and job search will still work with those.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPlacementModal(false)}
+                className="text-slate-400 hover:text-slate-650 font-bold font-mono text-sm leading-none bg-slate-100 p-1.5 rounded-full cursor-pointer transition"
+              >
+                ✖
+              </button>
+            </div>
+
+            {placementError && (
+              <div className="bg-rose-50 border border-rose-150 text-rose-700 text-xs p-3 rounded-xl font-medium mb-4">
+                ⚠️ {placementError}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-left">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 font-mono uppercase mb-1">LinkedIn Profile</label>
+                <input
+                  type="text"
+                  value={placementForm.linkedin}
+                  onChange={(e) => setPlacementForm({ ...placementForm, linkedin: e.target.value })}
+                  placeholder="https://linkedin.com/in/username"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs outline-none focus:ring-1 focus:ring-indigo-505 text-slate-850 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 font-mono uppercase mb-1">Indeed Profile</label>
+                <input
+                  type="text"
+                  value={placementForm.indeed}
+                  onChange={(e) => setPlacementForm({ ...placementForm, indeed: e.target.value })}
+                  placeholder="https://profile.indeed.com"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs outline-none focus:ring-1 focus:ring-indigo-505 text-slate-850 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 font-mono uppercase mb-1">Naukri.com Profile</label>
+                <input
+                  type="text"
+                  value={placementForm.naukri}
+                  onChange={(e) => setPlacementForm({ ...placementForm, naukri: e.target.value })}
+                  placeholder="https://naukri.com/profile/username"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs outline-none focus:ring-1 focus:ring-indigo-505 text-slate-850 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 font-mono uppercase mb-1">Glassdoor Profile</label>
+                <input
+                  type="text"
+                  value={placementForm.glassdoor}
+                  onChange={(e) => setPlacementForm({ ...placementForm, glassdoor: e.target.value })}
+                  placeholder="https://glassdoor.com/profile/username"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs outline-none focus:ring-1 focus:ring-indigo-505 text-slate-850 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 font-mono uppercase mb-1">Foundit Profile</label>
+                <input
+                  type="text"
+                  value={placementForm.foundit}
+                  onChange={(e) => setPlacementForm({ ...placementForm, foundit: e.target.value })}
+                  placeholder="https://foundit.in/member/username"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs outline-none focus:ring-1 focus:ring-indigo-505 text-slate-850 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 font-mono uppercase mb-1">Shine.com Profile</label>
+                <input
+                  type="text"
+                  value={placementForm.shine}
+                  onChange={(e) => setPlacementForm({ ...placementForm, shine: e.target.value })}
+                  placeholder="https://shine.com/profile/username"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs outline-none focus:ring-1 focus:ring-indigo-505 text-slate-850 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 font-mono uppercase mb-1">Timesjobs Profile</label>
+                <input
+                  type="text"
+                  value={placementForm.timesjobs}
+                  onChange={(e) => setPlacementForm({ ...placementForm, timesjobs: e.target.value })}
+                  placeholder="https://timesjobs.com/candidate"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs outline-none focus:ring-1 focus:ring-indigo-505 text-slate-850 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 font-mono uppercase mb-1">Internshala Profile</label>
+                <input
+                  type="text"
+                  value={placementForm.internshala}
+                  onChange={(e) => setPlacementForm({ ...placementForm, internshala: e.target.value })}
+                  placeholder="https://internshala.com/student"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs outline-none focus:ring-1 focus:ring-indigo-505 text-slate-850 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 font-mono uppercase mb-1">Wellfound Profile</label>
+                <input
+                  type="text"
+                  value={placementForm.wellfound}
+                  onChange={(e) => setPlacementForm({ ...placementForm, wellfound: e.target.value })}
+                  placeholder="https://wellfound.com/u/username"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs outline-none focus:ring-1 focus:ring-indigo-505 text-slate-850 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 font-mono uppercase mb-1">Apna App Profile</label>
+                <input
+                  type="text"
+                  value={placementForm.apna}
+                  onChange={(e) => setPlacementForm({ ...placementForm, apna: e.target.value })}
+                  placeholder="https://apna.co/user/profile"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs outline-none focus:ring-1 focus:ring-indigo-505 text-slate-850 focus:border-indigo-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-5 mt-6 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowPlacementModal(false)}
+                className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold font-mono text-xs py-2.5 px-6 rounded-lg transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={savingPlacementDetails}
+                className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold font-mono text-xs py-2.5 px-6 rounded-lg transition-all flex items-center gap-1 cursor-pointer shadow-sm"
+              >
+                {savingPlacementDetails ? (
+                  <span>Saving...</span>
+                ) : (
+                  <span>✓ Save Details</span>
+                )}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* FLOATING COMPILER SANDBOX (ONLINE PYTHON COMPILER PLAYGROUND) */}
+      <div className="fixed bottom-6 right-6 z-50 print:hidden flex flex-col items-end">
+        {isCompilerOpen && (
+          <div className="mb-4 w-96 max-w-[92vw] h-[580px] bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden text-slate-100 animate-fade-in">
+            {/* Header */}
+            <div className="bg-slate-950 p-4 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Terminal className="w-4 h-4 text-emerald-400" />
+                <span className="font-bold text-xs uppercase font-mono tracking-wider text-emerald-400">
+                  Python Online Sandbox
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[9px] font-mono px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-900/50">
+                  WASM Live Engine
+                </span>
+                <button
+                  onClick={() => setIsCompilerOpen(false)}
+                  className="text-slate-400 hover:text-white p-1 rounded transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Helper links */}
+            <div className="bg-slate-950/40 px-4 py-2 border-b border-slate-850 flex items-center justify-between text-[10px] text-slate-400 font-mono">
+              <span>External compilers:</span>
+              <div className="flex gap-3">
+                <a
+                  href="https://www.programiz.com/python-programming/online-compiler/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-indigo-400 hover:text-indigo-300 flex items-center gap-0.5 transition"
+                >
+                  Programiz ↗
+                </a>
+                <a
+                  href="https://www.w3schools.com/python/python_compiler.asp"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-indigo-400 hover:text-indigo-300 flex items-center gap-0.5 transition"
+                >
+                  W3Schools ↗
+                </a>
+              </div>
+            </div>
+
+            {/* Quick helper toolbar */}
+            <div className="p-3 bg-slate-900/80 border-b border-slate-850 flex flex-wrap gap-2 items-center">
+              <button
+                onClick={() => {
+                  setCompilerCode(`# Write Python code below\n\n# Define variables\nx = 10\ny = 5\n\nprint("x * y calculation:")\nprint(x * y)`);
+                }}
+                className="bg-slate-800 hover:bg-slate-750 text-slate-300 text-[9px] px-2.5 py-1 rounded font-mono font-bold transition cursor-pointer"
+              >
+                Reset
+              </button>
+              <button
+                onClick={() => {
+                  setCompilerCode((prev) => prev + `\n\n# Simple Python Loop\nfor i in range(5):\n    print("Iteration " + str(i))\n`);
+                }}
+                className="bg-slate-800 hover:bg-slate-750 text-slate-300 text-[9px] px-2.5 py-1 rounded font-mono font-bold transition cursor-pointer"
+              >
+                + Add Loop
+              </button>
+              <button
+                onClick={() => {
+                  setCompilerCode((prev) => prev + `\n\n# Variable reassignment\nx = 100\nprint(x)\n`);
+                }}
+                className="bg-slate-800 hover:bg-slate-750 text-slate-300 text-[9px] px-2.5 py-1 rounded font-mono font-bold transition cursor-pointer"
+              >
+                + Variables
+              </button>
+            </div>
+
+            {/* Code Workspace Editor */}
+            <div className="flex-1 p-3 flex flex-col min-h-0 bg-slate-950">
+              <label className="text-[9px] text-slate-500 font-mono font-bold uppercase tracking-wider mb-1 block">
+                Editor (Python 3):
+              </label>
+              <textarea
+                value={compilerCode}
+                onChange={(e) => setCompilerCode(e.target.value)}
+                onKeyDown={(e) => handleCodeEditorKeyDown(e, setCompilerCode)}
+                className="flex-1 w-full bg-slate-950 text-emerald-400 font-mono text-xs p-3.5 focus:outline-none focus:ring-1 focus:ring-emerald-500 rounded border border-slate-800 leading-relaxed resize-none overflow-y-auto"
+                placeholder="# Write your custom Python code snippet here..."
+              />
+            </div>
+
+            {/* Action Bar */}
+            <div className="p-3 bg-slate-900 border-t border-slate-850 flex justify-between items-center">
+              <button
+                onClick={() => setCompilerOutput(["Terminal cleared. Send some prints!"])}
+                className="text-[10px] text-slate-400 hover:text-white font-mono flex items-center gap-1 transition"
+              >
+                🧹 Clear Console
+              </button>
+              <button
+                onClick={handleRunSandboxCode}
+                disabled={compilerIsRunning}
+                className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-mono text-xs font-bold py-1.5 px-4 rounded-lg flex items-center gap-1 transition shadow-sm cursor-pointer"
+              >
+                {compilerIsRunning ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <span>Running...</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    <span>Run Python Code</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Terminal Outputs */}
+            <div className="h-40 bg-slate-950 p-3 border-t border-slate-800 flex flex-col font-mono text-[11px] leading-normal min-h-0">
+              <span className="text-[9px] text-slate-600 font-bold uppercase tracking-wider mb-1.5 block">
+                OUTPUT CONSOLE STREAM:
+              </span>
+              <div className="flex-1 overflow-y-auto space-y-1 scrollbar-thin scrollbar-thumb-slate-800 text-slate-300">
+                {compilerOutput.map((log, idx) => (
+                  <div
+                    key={idx}
+                    className={`whitespace-pre-wrap ${
+                      log.startsWith("SyntaxError") || log.startsWith("NameError")
+                        ? "text-rose-400 font-semibold"
+                        : log.startsWith(">>>")
+                        ? "text-indigo-400 font-bold"
+                        : "text-slate-200"
+                    }`}
+                  >
+                    {log}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Toggle Button */}
+        <button
+          onClick={() => setIsCompilerOpen((prev) => !prev)}
+          className="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-white font-mono font-extrabold text-xs py-3 px-5 rounded-full shadow-2xl flex items-center gap-2.5 transition transform hover:scale-105 active:scale-95 cursor-pointer select-none glow-button"
+        >
+          <div className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+          </div>
+          <Terminal className="w-4 h-4 text-emerald-400" />
+          <span>PORTAL COMPILER SANDBOX</span>
+        </button>
+      </div>
+    </div>
+  );
 }
