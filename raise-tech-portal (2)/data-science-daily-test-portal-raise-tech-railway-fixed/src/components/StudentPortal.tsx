@@ -32,7 +32,7 @@ import {
   X,
   Terminal
 } from "lucide-react";
-import { Student, DayQuiz, SYLLABUS, getCourseForDay, getCourseForDayByTrack, getTopicTitleForDay, Submission, AIInterview } from "../types.js";
+import { Student, DayQuiz, SYLLABUS, getCourseForDay, getTopicTitleForDay, Submission, AIInterview } from "../types.js";
 import AiInterviewRoom from "./AiInterviewRoom.js";
 import { ASSESSMENT_PRESETS, SubjectAssessment } from "../assessmentsData.js";
 import StudentAssessmentsView from "./StudentAssessmentsView.js";
@@ -53,11 +53,6 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
   const [activeTab, setActiveTab] = useState<"curriculum" | "assessments" | "interview" | "careers" | "resume">("curriculum");
   const [studentInterviews, setStudentInterviews] = useState<AIInterview[]>([]);
   const [jobLocation, setJobLocation] = useState<string>("Hyderabad, India");
-
-  // Which daily-test curriculum track this student's batch follows: "data-science"
-  // (default/legacy), "python", or "java". Drives which quiz content set is fetched.
-  const studentCourseTrack: "data-science" | "python" | "java" =
-    (locks[student.batch]?.courseTrack as any) || "data-science";
 
   // Resume Analyzer States
   const [resumeText, setResumeText] = useState<string>("");
@@ -609,7 +604,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
       if (res.ok) {
         setLiveJobs(data.jobs || []);
         if ((data.jobs || []).length === 0) {
-          setLiveJobsError("No verified postings from the last 48 hours were found for this exact search. Try a different role, or widen your preferred location, and search again.");
+          setLiveJobsError("No verified live postings were found for this search right now. Try a different role or location.");
         }
       } else {
         setLiveJobsError(data.error || "Live job search failed. Please try again.");
@@ -744,7 +739,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
     setShowReviewExplanations(false);
 
     try {
-      const res = await fetch(`/api/quiz/${dayNum}?track=${studentCourseTrack}`);
+      const res = await fetch(`/api/quiz/${dayNum}`);
       if (res.ok) {
         const quiz = await res.json();
         setQuizData(quiz);
@@ -1121,8 +1116,8 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
             {/* AI INTERVIEWS SUMMARY AND METRICS BAR */}
             <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs grid grid-cols-1 md:grid-cols-3 gap-5 items-center font-sans">
               <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-xl bg-amber-50 flex items-center justify-center text-amber-600 font-extrabold shadow-2xs">
-                  <Sparkles className="w-5.5 h-5.5 text-amber-600" />
+                <div className="w-11 h-11 rounded-xl bg-indigo-50 flex items-center justify-center text-indigo-600 font-extrabold shadow-2xs">
+                  <Sparkles className="w-5.5 h-5.5 text-indigo-600" />
                 </div>
                 <div>
                   <h3 className="text-xs font-extrabold text-slate-900 uppercase tracking-wider font-mono">AI Interview Metrics</h3>
@@ -1139,7 +1134,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                 </div>
                 <div>
                   <span className="text-[9px] text-slate-400 block uppercase font-bold tracking-wider font-mono">Avg Score</span>
-                  <span className="text-lg font-black text-amber-600 font-mono">
+                  <span className="text-lg font-black text-indigo-600 font-mono">
                     {studentInterviews.length > 0
                       ? Math.round(studentInterviews.reduce((acc, curr) => acc + (curr.report?.score || 0), 0) / studentInterviews.length) + "%"
                       : "0%"}
@@ -1198,11 +1193,11 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                 onClick={() => setActiveTab("interview")}
                 className={`pb-3 text-xs uppercase tracking-wider font-extrabold flex items-center gap-2 border-b-2 transition cursor-pointer whitespace-nowrap ${
                   activeTab === "interview"
-                    ? "border-amber-600 text-amber-600 font-bold"
+                    ? "border-indigo-600 text-indigo-600 font-bold"
                     : "border-transparent text-slate-400 hover:text-slate-650"
                 }`}
               >
-                <Sparkles className="w-4 h-4 text-amber-600 fill-amber-100" />
+                <Sparkles className="w-4 h-4 text-indigo-600 fill-indigo-100" />
                 AI Technical Mock Recruiter (Gemini 3.5)
               </button>
               
@@ -1224,7 +1219,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                 onClick={() => setActiveTab("careers")}
                 className={`pb-3 text-xs uppercase tracking-wider font-extrabold flex items-center gap-2 border-b-2 transition cursor-pointer whitespace-nowrap ${
                   activeTab === "careers"
-                    ? "border-amber-600 text-amber-600 font-bold"
+                    ? "border-indigo-600 text-indigo-600 font-bold"
                     : "border-transparent text-slate-400 hover:text-slate-650"
                 }`}
               >
@@ -1357,7 +1352,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                 {unlockedDays.length > 0 ? (
                   <>
                     <div className="text-md font-bold text-slate-900 leading-tight">
-                      {getCourseForDayByTrack(Math.max(...unlockedDays), studentCourseTrack).name}
+                      {getCourseForDay(Math.max(...unlockedDays)).name}
                     </div>
                     <span className="text-[9px] font-mono text-indigo-600 font-medium">
                       Curriculum Max unlocked: Day #{Math.max(...unlockedDays)}
@@ -1383,7 +1378,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                 <h3 className="text-xl font-bold text-slate-900">
                   Topic: {quizData.topicTitle}
                 </h3>
-                <p className="text-xs text-slate-400">Subject Field: {getCourseForDayByTrack(activeDay, studentCourseTrack).name}</p>
+                <p className="text-xs text-slate-400">Subject Field: {getCourseForDay(activeDay).name}</p>
               </div>
 
               {!isTestSubmitted && (
@@ -2366,7 +2361,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
               <button
                 type="button"
                 onClick={() => fetchStudentContext()}
-                className="bg-amber-600 hover:bg-amber-700 text-white font-mono font-bold text-xs py-2 px-6 rounded-lg transition shadow-xs cursor-pointer"
+                className="bg-indigo-600 hover:bg-indigo-700 text-white font-mono font-bold text-xs py-2 px-6 rounded-lg transition shadow-xs cursor-pointer"
               >
                 Sync Authorization Status
               </button>
@@ -2406,7 +2401,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                     <div key={item.id} className="bg-slate-950 rounded-2xl border border-slate-850 p-4 text-white flex flex-col justify-between space-y-3.5 shadow-md">
                       <div className="flex justify-between items-start gap-2">
                         <div>
-                          <h4 className="text-xs font-black text-amber-400 uppercase font-mono tracking-wider">
+                          <h4 className="text-xs font-black text-indigo-400 uppercase font-mono tracking-wider">
                             {item.subject} &bull; {item.difficulty}
                           </h4>
                           <p className="text-[10px] text-slate-400 mt-0.5 font-sans">
@@ -2427,7 +2422,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                       </div>
 
                       <div className="space-y-1 bg-slate-900/50 p-3 rounded-xl border border-slate-850/50">
-                        <span className="text-[9px] font-bold text-amber-300 uppercase tracking-wider block font-mono">Feedback Summary:</span>
+                        <span className="text-[9px] font-bold text-indigo-300 uppercase tracking-wider block font-mono">Feedback Summary:</span>
                         <p className="text-[10.5px] text-slate-300 leading-normal font-sans italic">
                           "{item.report?.summary}"
                         </p>
@@ -2439,7 +2434,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
           </div>
         ) : activeTab === "careers" ? (
           (!currentStudentObj?.placementPermission && !specialPermissionBypass) ? (
-            <div className="bg-gradient-to-br from-slate-900 via-amber-950 to-slate-900 rounded-2xl p-8 border border-slate-800 text-center text-white shadow-xl max-w-3xl mx-auto space-y-6 my-6 animate-fade-in">
+            <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 rounded-2xl p-8 border border-slate-800 text-center text-white shadow-xl max-w-3xl mx-auto space-y-6 my-6 animate-fade-in">
               <div className="mx-auto w-16 h-16 bg-slate-800/85 border border-amber-500/30 rounded-full flex items-center justify-center text-amber-400 animate-pulse">
                 <Lock className="w-8 h-8" />
               </div>
@@ -2452,8 +2447,8 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
 
               {/* Course Completed check - trigger details collection to help management */}
               <div className="bg-white/5 border border-white/10 rounded-2xl p-6 space-y-4 max-w-2xl mx-auto">
-                <div className="flex items-center gap-2.5 justify-center text-amber-300">
-                  <Award className="w-5 h-5 text-amber-400" />
+                <div className="flex items-center gap-2.5 justify-center text-indigo-300">
+                  <Award className="w-5 h-5 text-indigo-400" />
                   <span className="font-bold text-xs uppercase font-mono tracking-widest">Enrollment & Details Collection</span>
                 </div>
                 <p className="text-xs text-slate-300 leading-relaxed font-sans max-w-lg mx-auto">
@@ -2476,7 +2471,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                     });
                     setShowPlacementModal(true);
                   }}
-                  className="bg-amber-600 hover:bg-amber-700 text-white font-extrabold font-mono text-xs py-2.5 px-6 rounded-xl transition shadow-lg shrink-0 inline-flex items-center gap-2 cursor-pointer"
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold font-mono text-xs py-2.5 px-6 rounded-xl transition shadow-lg shrink-0 inline-flex items-center gap-2 cursor-pointer"
                 >
                   <Edit className="w-4 h-4" />
                   <span>Fill Your Details (Management)</span>
@@ -2484,7 +2479,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
               </div>
 
               <div className="pt-2">
-                <span className="text-[10px] text-amber-400 font-mono uppercase tracking-widest block text-center">Compatible Portals</span>
+                <span className="text-[10px] text-indigo-400 font-mono uppercase tracking-widest block text-center">Compatible Portals</span>
                 <div className="mt-3 flex flex-wrap gap-2 justify-center max-w-lg mx-auto opacity-70">
                   {["LinkedIn", "Indeed", "Naukri.com", "Glassdoor", "Foundit", "Shine.com", "Timesjobs", "Internshala", "Wellfound", "Apna App"].map((platform) => (
                     <span key={platform} className="bg-slate-800 border border-slate-700 rounded-xl px-2.5 py-1 text-[10px] font-mono text-slate-300">
@@ -2495,11 +2490,11 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
               </div>
             </div>
           ) : (
-            <div className="bg-gradient-to-br from-slate-900 to-amber-950 rounded-2xl p-6 border border-slate-800 text-white shadow-lg space-y-6 animate-fade-in">
-              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-amber-900 pb-5">
+            <div className="bg-gradient-to-br from-slate-900 to-indigo-950 rounded-2xl p-6 border border-slate-800 text-white shadow-lg space-y-6 animate-fade-in">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-indigo-900 pb-5">
                 <div className="space-y-1">
                   <div className="flex gap-2 items-center flex-wrap">
-                    <span className="bg-gradient-to-r from-amber-500 to-emerald-500 text-white font-mono text-[9px] font-extrabold py-1 px-2.5 rounded-full uppercase tracking-wider inline-block">
+                    <span className="bg-gradient-to-r from-indigo-500 to-emerald-500 text-white font-mono text-[9px] font-extrabold py-1 px-2.5 rounded-full uppercase tracking-wider inline-block">
                       Unified Jobs Placement Hub
                     </span>
                     <span className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-mono text-[9px] font-extrabold py-1 px-2.5 rounded-full uppercase tracking-wider inline-block">
@@ -2533,7 +2528,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                       });
                       setShowPlacementModal(true);
                     }}
-                    className="bg-amber-600 hover:bg-amber-700 text-white font-extrabold font-mono text-xs py-2 px-4 rounded-xl transition flex items-center justify-center gap-2 cursor-pointer shadow-sm border border-amber-500/20"
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold font-mono text-xs py-2 px-4 rounded-xl transition flex items-center justify-center gap-2 cursor-pointer shadow-sm border border-indigo-500/20"
                   >
                     <Edit className="w-3.5 h-3.5" />
                     <span>Fill Your Details</span>
@@ -2549,7 +2544,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                         value={jobLocation}
                         onChange={(e) => setJobLocation(e.target.value)}
                         placeholder="e.g. Hyderabad, India"
-                        className="bg-white/10 hover:bg-white/15 focus:bg-white/18 text-white text-xs font-mono font-bold py-2 pl-3 pr-9 rounded-xl outline-none border border-white/15 focus:border-amber-500 transition w-full sm:w-56 placeholder-white/30"
+                        className="bg-white/10 hover:bg-white/15 focus:bg-white/18 text-white text-xs font-mono font-bold py-2 pl-3 pr-9 rounded-xl outline-none border border-white/15 focus:border-indigo-500 transition w-full sm:w-56 placeholder-white/30"
                       />
                       <Search className="w-4 h-4 text-white/40 absolute right-3 top-2.5" />
                     </div>
@@ -2562,7 +2557,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
               {/* Left Column: Resume Input & Analysis Metadata */}
               <div className="lg:col-span-5 space-y-5 bg-white/5 border border-white/10 p-5 rounded-2xl flex flex-col justify-between">
                 <div className="space-y-4">
-                  <div className="flex items-center gap-2 text-amber-300">
+                  <div className="flex items-center gap-2 text-indigo-300">
                     <FileText className="w-5 h-5" />
                     <span className="font-extrabold text-sm tracking-wide uppercase font-mono">
                       AI Resume Analyzer & Optimizer
@@ -2582,7 +2577,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                       onChange={(e) => setResumeText(e.target.value)}
                       placeholder="e.g. Arjun Sharma | Data Scientist. Tech Stack: Python, Pandas, Scikit-Learn pipelines, TensorFlow. Built a predictive heart disease model using Decision Trees..."
                       rows={5}
-                      className="bg-slate-950/60 hover:bg-slate-950/80 focus:bg-slate-950 text-white text-xs font-mono p-3 rounded-xl border border-white/10 focus:border-amber-500 outline-none w-full transition resize-none placeholder-white/20"
+                      className="bg-slate-950/60 hover:bg-slate-950/80 focus:bg-slate-950 text-white text-xs font-mono p-3 rounded-xl border border-white/10 focus:border-indigo-500 outline-none w-full transition resize-none placeholder-white/20"
                     />
                   </div>
 
@@ -2596,7 +2591,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                   <button
                     onClick={handleAnalyzeResume}
                     disabled={analyzingResume}
-                    className="bg-gradient-to-r from-emerald-500 to-amber-600 hover:from-emerald-400 hover:to-amber-500 disabled:from-slate-705 disabled:to-slate-805 disabled:text-slate-500 text-white font-extrabold text-xs py-3 px-4 rounded-xl transition-all w-full flex items-center justify-center gap-2 cursor-pointer shadow-md shadow-amber-950/30 font-mono tracking-wide uppercase"
+                    className="bg-gradient-to-r from-emerald-500 to-indigo-600 hover:from-emerald-400 hover:to-indigo-500 disabled:from-slate-705 disabled:to-slate-805 disabled:text-slate-500 text-white font-extrabold text-xs py-3 px-4 rounded-xl transition-all w-full flex items-center justify-center gap-2 cursor-pointer shadow-md shadow-indigo-950/30 font-mono tracking-wide uppercase"
                   >
                     {analyzingResume ? (
                       <>
@@ -2633,7 +2628,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                           {resumeAnalysisResult.skills.map((sk: string, sIdx: number) => (
                             <span
                               key={sIdx}
-                              className="bg-amber-900/40 border border-amber-700/30 text-amber-300 text-[9px] font-bold px-2 py-0.5 rounded-md font-mono"
+                              className="bg-indigo-900/40 border border-indigo-700/30 text-indigo-300 text-[9px] font-bold px-2 py-0.5 rounded-md font-mono"
                             >
                               {sk}
                             </span>
@@ -2723,7 +2718,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                         {/* Badges strip */}
                         <div className="flex flex-wrap gap-1.5">
                           {pyDone >= 5 && <span className="bg-emerald-600/35 border border-emerald-500/40 text-emerald-300 font-mono text-[9px] font-bold px-2 py-0.5 rounded-lg">#Python3</span>}
-                          {numPyDone >= 3 && <span className="bg-amber-600/35 border border-amber-500/40 text-amber-300 font-mono text-[9px] font-bold px-2 py-0.5 rounded-lg">#NumPy_Arrays</span>}
+                          {numPyDone >= 3 && <span className="bg-indigo-600/35 border border-indigo-500/40 text-indigo-300 font-mono text-[9px] font-bold px-2 py-0.5 rounded-lg">#NumPy_Arrays</span>}
                           {pandasDone >= 3 && <span className="bg-cyan-600/35 border border-cyan-500/40 text-cyan-300 font-mono text-[9px] font-bold px-2 py-0.5 rounded-lg">#Pandas_Frames</span>}
                           {mlDone >= 2 && <span className="bg-amber-600/35 border border-amber-500/40 text-amber-300 font-mono text-[9px] font-bold px-2 py-0.5 rounded-lg">#Scikit_ML</span>}
                         </div>
@@ -2731,7 +2726,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
 
                       {/* Matching Warning Banner if in classroom path */}
                       {!isResumeMode && (
-                        <div className="bg-amber-950/40 border border-amber-800/40 p-4 rounded-xl text-xs text-slate-300 flex items-start gap-2.5 animate-pulse">
+                        <div className="bg-indigo-950/40 border border-indigo-800/40 p-4 rounded-xl text-xs text-slate-300 flex items-start gap-2.5 animate-pulse">
                           <Sparkles className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                           <p>
                             Showing standard academy matching templates. Paste your credentials on the left to extract custom job searches optimized around your individual experience!
@@ -2752,8 +2747,8 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                               key={idx} 
                               className={`p-4 rounded-xl border flex flex-col justify-between transition duration-300 ${
                                 isResumeMode 
-                                  ? "bg-amber-950/25 border-amber-500/40 hover:border-amber-400" 
-                                  : "bg-white/5 border-white/10 hover:border-amber-400"
+                                  ? "bg-indigo-950/25 border-indigo-500/40 hover:border-indigo-400" 
+                                  : "bg-white/5 border-white/10 hover:border-indigo-400"
                               }`}
                             >
                               <div>
@@ -2761,7 +2756,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                   <h5 className="font-extrabold text-sm text-white leading-snug">
                                     {role.title}
                                   </h5>
-                                  <Briefcase className={`w-4 h-4 shrink-0 ${role.isUnlocked || isResumeMode ? "text-amber-400" : "text-slate-500"}`} />
+                                  <Briefcase className={`w-4 h-4 shrink-0 ${role.isUnlocked || isResumeMode ? "text-indigo-400" : "text-slate-500"}`} />
                                 </div>
                                 <p className="text-[10px] text-slate-400 mt-1 line-clamp-2">
                                   Skills: {role.skillsRequired}
@@ -2770,7 +2765,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                               
                               {(role.isUnlocked || isResumeMode) ? (
                                 <div className="mt-4 space-y-2 pt-3 border-t border-white/5">
-                                  <span className="text-[9px] uppercase font-mono font-bold text-amber-300 block">
+                                  <span className="text-[9px] uppercase font-mono font-bold text-indigo-300 block">
                                     Search Live Jobs on Portals:
                                   </span>
                                   <div className="grid grid-cols-2 gap-1.5">
@@ -2815,7 +2810,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                     href={googleUrl}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="bg-amber-600 hover:bg-amber-555 border border-amber-500/25 text-white text-[9px] font-bold py-1.5 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition w-full focus:outline-none"
+                                    className="bg-indigo-600 hover:bg-indigo-555 border border-indigo-500/25 text-white text-[9px] font-bold py-1.5 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition w-full focus:outline-none"
                                   >
                                     <span>Google Careers Results</span>
                                     <Search className="w-2.5 h-2.5 shrink-0" />
@@ -2871,7 +2866,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                           {loadingLiveJobs && (
                             <div className="text-xs text-emerald-200 italic py-4 text-center flex items-center justify-center gap-2">
                               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              Searching LinkedIn, Naukri, Indeed, Glassdoor & 6+ more portals for postings from the last 48 hours...
+                              Searching LinkedIn, Naukri, Indeed & company career pages for real openings...
                             </div>
                           )}
 
@@ -2879,6 +2874,12 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                             <div className="text-xs text-amber-300 bg-amber-950/30 border border-amber-700/30 rounded-lg p-3">
                               {liveJobsError}
                             </div>
+                          )}
+
+                          {!loadingLiveJobs && liveJobs.length > 0 && (
+                            <p className="text-[10px] text-emerald-400/70 italic -mt-1">
+                              Filtered to postings from the last 48 hours. Since hiring pages update in real time, a listing can occasionally close between when it was found and when you click — if that happens, try refreshing this search.
+                            </p>
                           )}
 
                           {!loadingLiveJobs && liveJobs.length > 0 && (
@@ -2895,7 +2896,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                         {job.location || "Location not specified"} &bull; via {job.source || "Web"}
                                       </p>
                                       {job.postedWithin && (
-                                        <span className="inline-block mt-1 text-[9px] font-bold text-emerald-300 bg-emerald-900/40 border border-emerald-700/40 px-1.5 py-0.5 rounded-md">
+                                        <span className="inline-block mt-1 text-[9px] font-mono font-bold text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.5 rounded-full">
                                           🕒 {job.postedWithin}
                                         </span>
                                       )}
@@ -2905,7 +2906,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                         href={job.applyUrl}
                                         target="_blank"
                                         rel="noreferrer"
-                                        className="bg-amber-600 hover:bg-amber-550 text-white text-[9px] font-extrabold py-1.5 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition focus:outline-none"
+                                        className="bg-indigo-600 hover:bg-indigo-550 text-white text-[9px] font-extrabold py-1.5 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition focus:outline-none"
                                       >
                                         <span>View & Apply</span>
                                         <ExternalLink className="w-2.5 h-2.5 shrink-0" />
@@ -2940,9 +2941,9 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                       {/* Job-Tailored Resume Result: rewritten resume that foregrounds the exact
                           skills mentioned in the selected job's title/description */}
                       {(tailoredResumeResult || tailoredResumeError) && (
-                        <div className="bg-amber-950/40 border border-amber-500/30 rounded-2xl p-4 space-y-3">
+                        <div className="bg-indigo-950/40 border border-indigo-500/30 rounded-2xl p-4 space-y-3">
                           <div className="flex items-center justify-between gap-2">
-                            <h5 className="text-xs font-extrabold text-amber-300 uppercase tracking-wide font-mono flex items-center gap-1.5">
+                            <h5 className="text-xs font-extrabold text-indigo-300 uppercase tracking-wide font-mono flex items-center gap-1.5">
                               <FileText className="w-3.5 h-3.5" />
                               Job-Tailored Resume{tailoredResumeResult?.tailoredFor ? ` — ${tailoredResumeResult.tailoredFor}` : ""}
                             </h5>
@@ -2950,7 +2951,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                               <button
                                 type="button"
                                 onClick={() => navigator.clipboard.writeText(tailoredResumeResult.formattedResume)}
-                                className="text-[9px] font-bold text-amber-300 hover:text-white flex items-center gap-1 cursor-pointer"
+                                className="text-[9px] font-bold text-indigo-300 hover:text-white flex items-center gap-1 cursor-pointer"
                               >
                                 <Copy className="w-2.5 h-2.5" />
                                 Copy
@@ -2976,7 +2977,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                 <div className="flex flex-wrap gap-1.5">
                                   <span className="text-[9px] font-mono font-bold text-slate-400 uppercase mr-1">Keywords matched from job:</span>
                                   {tailoredResumeResult.optimizedKeywords.map((kw: string, kIdx: number) => (
-                                    <span key={kIdx} className="bg-amber-600/30 border border-amber-500/40 text-amber-200 text-[9px] font-bold px-2 py-0.5 rounded-full">
+                                    <span key={kIdx} className="bg-indigo-600/30 border border-indigo-500/40 text-indigo-200 text-[9px] font-bold px-2 py-0.5 rounded-full">
                                       {kw}
                                     </span>
                                   ))}
@@ -2996,7 +2997,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
 
                       {/* Display customizable helper query below the matches */}
                       {isResumeMode && (
-                        <div className="bg-amber-950/40 border border-amber-500/10 p-3.5 rounded-xl text-[11px] text-slate-350 space-y-1">
+                        <div className="bg-indigo-950/40 border border-indigo-500/10 p-3.5 rounded-xl text-[11px] text-slate-350 space-y-1">
                           <span className="font-bold text-emerald-400 font-mono text-[10px] uppercase block">
                             💡 Advanced Recruiter Tip:
                           </span>
@@ -3099,14 +3100,14 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                         <p className="text-xs text-slate-300 max-w-lg mx-auto leading-relaxed">
                           Requires completing at least 50% of the syllabus milestones (100 days of curriculum assessments) to dynamically certify. You have currently completed <strong>{completedMilestones} / 200 Days</strong> checks.
                         </p>
-                        <p className="text-[11px] text-amber-400 font-bold font-mono">
+                        <p className="text-[11px] text-indigo-400 font-bold font-mono">
                           ★ Developer Sandbox Tip: Check the "Bypass Lock" checkbox above to use this builder immediately!
                         </p>
                       </div>
                     ) : (
                       /* Active ATS Compiler module */
                       <div className="space-y-6">
-                        <div className="bg-amber-900/10 border border-amber-700/20 p-4 rounded-xl text-xs text-amber-200 flex items-start gap-2.5">
+                        <div className="bg-indigo-900/10 border border-indigo-700/20 p-4 rounded-xl text-xs text-indigo-200 flex items-start gap-2.5">
                           <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400 mt-0.5" />
                           <p>
                             <strong>Academy Verification Active:</strong> Your actual training records (<strong>{completedMilestones} checkpoints completed</strong> with average score of <strong>{avgScore}%</strong>) are certified and compiled dynamically into your resume's Verified Credentials block!
@@ -3116,7 +3117,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                           {/* Left Column questionnaire */}
                           <div className="lg:col-span-5 space-y-4 bg-white/5 border border-white/10 p-5 rounded-xl">
-                            <span className="font-extrabold text-xs uppercase font-mono tracking-wider text-amber-300 block border-b border-white/5 pb-2">
+                            <span className="font-extrabold text-xs uppercase font-mono tracking-wider text-indigo-300 block border-b border-white/5 pb-2">
                               1. Personal & Technical Inputs
                             </span>
 
@@ -3127,7 +3128,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                   type="text"
                                   value={atsInputs.fullName}
                                   onChange={(e) => setAtsInputs({ ...atsInputs, fullName: e.target.value })}
-                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-indigo-500 transition"
                                 />
                               </div>
                               <div className="space-y-1">
@@ -3136,7 +3137,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                   type="text"
                                   value={atsInputs.email}
                                   onChange={(e) => setAtsInputs({ ...atsInputs, email: e.target.value })}
-                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-indigo-500 transition"
                                 />
                               </div>
                             </div>
@@ -3148,7 +3149,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                   type="text"
                                   value={atsInputs.phone}
                                   onChange={(e) => setAtsInputs({ ...atsInputs, phone: e.target.value })}
-                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-indigo-500 transition"
                                 />
                               </div>
                               <div className="space-y-1">
@@ -3157,7 +3158,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                   type="text"
                                   value={atsInputs.linkedin}
                                   onChange={(e) => setAtsInputs({ ...atsInputs, linkedin: e.target.value })}
-                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                                  className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-indigo-500 transition"
                                 />
                               </div>
                             </div>
@@ -3168,7 +3169,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                 type="text"
                                 value={atsInputs.github}
                                 onChange={(e) => setAtsInputs({ ...atsInputs, github: e.target.value })}
-                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-indigo-500 transition"
                               />
                             </div>
 
@@ -3178,7 +3179,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                 value={atsInputs.objective}
                                 onChange={(e) => setAtsInputs({ ...atsInputs, objective: e.target.value })}
                                 rows={3}
-                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition resize-none leading-relaxed"
+                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-indigo-500 transition resize-none leading-relaxed"
                               />
                             </div>
 
@@ -3188,7 +3189,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                 value={atsInputs.topSkills}
                                 onChange={(e) => setAtsInputs({ ...atsInputs, topSkills: e.target.value })}
                                 rows={2}
-                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition resize-none leading-relaxed"
+                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-indigo-500 transition resize-none leading-relaxed"
                               />
                             </div>
 
@@ -3198,7 +3199,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                 value={atsInputs.projectsText}
                                 onChange={(e) => setAtsInputs({ ...atsInputs, projectsText: e.target.value })}
                                 rows={3}
-                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition resize-none leading-relaxed"
+                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-indigo-500 transition resize-none leading-relaxed"
                               />
                             </div>
 
@@ -3208,7 +3209,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                 type="text"
                                 value={atsInputs.educationText}
                                 onChange={(e) => setAtsInputs({ ...atsInputs, educationText: e.target.value })}
-                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-amber-500 transition"
+                                className="bg-slate-950/60 text-white text-xs p-2.5 rounded-lg border border-white/10 outline-none w-full focus:border-indigo-500 transition"
                               />
                             </div>
 
@@ -3222,7 +3223,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                             <button
                               onClick={handleBuildAtsResume}
                               disabled={compilingResume}
-                              className="bg-amber-600 hover:bg-amber-550 border border-amber-500/30 font-bold font-mono tracking-wider uppercase text-white py-3 px-4 rounded-xl transition duration-300 w-full flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                              className="bg-indigo-600 hover:bg-indigo-550 border border-indigo-500/30 font-bold font-mono tracking-wider uppercase text-white py-3 px-4 rounded-xl transition duration-300 w-full flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                             >
                               {compilingResume ? (
                                 <>
@@ -3264,7 +3265,7 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
                                   <div className="flex gap-2">
                                     <button
                                       onClick={copyToClipboard}
-                                      className="bg-amber-600/35 hover:bg-amber-600 border border-amber-500/30 text-white font-bold font-mono text-[10px] py-1.5 px-3 rounded-lg flex items-center gap-1.5 transition cursor-pointer"
+                                      className="bg-indigo-600/35 hover:bg-indigo-600 border border-indigo-500/30 text-white font-bold font-mono text-[10px] py-1.5 px-3 rounded-lg flex items-center gap-1.5 transition cursor-pointer"
                                     >
                                       {copiedAts ? (
                                         <>
@@ -3320,8 +3321,8 @@ export default function StudentPortal({ student, onLogout }: StudentPortalProps)
 
                                 {/* Recruiter hints */}
                                 {atsResult.atsTips && atsResult.atsTips.length > 0 && (
-                                  <div className="bg-amber-950/20 border border-amber-700/20 p-4 rounded-xl space-y-1.5">
-                                    <span className="text-[10px] uppercase font-mono font-bold text-amber-300 block">
+                                  <div className="bg-indigo-950/20 border border-indigo-700/20 p-4 rounded-xl space-y-1.5">
+                                    <span className="text-[10px] uppercase font-mono font-bold text-indigo-300 block">
                                       ★ Premium Recruiter Optimization Tips:
                                     </span>
                                     <ul className="list-disc pl-4 text-xs text-slate-300 space-y-1 font-sans">
